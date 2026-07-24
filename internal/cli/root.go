@@ -63,4 +63,6 @@ func commonTransferFlags(cmd *cobra.Command, opts *TransferFlags) {
 	cmd.Flags().StringVar(&opts.ChunkSize, "chunk-size", "", "pin CDC average chunk size (e.g. 64K, 1MiB)")
 	cmd.Flags().StringVar(&opts.ProfilePath, "profile", "", "path to load/save host autotune profile")
 	cmd.Flags().BoolVar(&opts.Insecure, "insecure", false, "skip QUIC TOFU certificate pinning (labs only)")
+	cmd.Flags().StringVar(&opts.LogFile, "log-file", "", "job event log path (default: DEST/.quiksync/logs/<job>.log)")
+	cmd.Flags().BoolVar(&opts.NoLog, "no-log", false, "disable tailable job event logging")
 }

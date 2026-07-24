@@ -50,7 +50,17 @@ func TestBuildConfig(t *testing.T) {
 	if !cfg.SyncMode {
 		t.Fatal("expected sync mode")
 	}
+	if cfg.LogFile == "" || cfg.ProgressInterval == 0 {
+		t.Fatalf("expected default logging, got log=%q interval=%v", cfg.LogFile, cfg.ProgressInterval)
+	}
 	if _, err := buildConfig("/s", "/d", TransferFlags{Compress: "gzip"}, false); err == nil {
 		t.Fatal("expected invalid compress")
+	}
+	cfg2, err := buildConfig("/s", "/d", TransferFlags{Compress: "none", NoLog: true}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg2.LogFile != "" {
+		t.Fatalf("expected no log, got %q", cfg2.LogFile)
 	}
 }

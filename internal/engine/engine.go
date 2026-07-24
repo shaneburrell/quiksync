@@ -16,6 +16,7 @@ import (
 	"github.com/shaneburrell/quiksync/internal/fsmeta"
 	"github.com/shaneburrell/quiksync/internal/index"
 	"github.com/shaneburrell/quiksync/internal/journal"
+	"github.com/shaneburrell/quiksync/internal/progress"
 	"github.com/shaneburrell/quiksync/internal/transfer"
 	"github.com/shaneburrell/quiksync/internal/transport"
 	"github.com/shaneburrell/quiksync/internal/transport/daemon"
@@ -41,6 +42,13 @@ type Config struct {
 	Insecure        bool   // skip QUIC TOFU pin verification (labs only)
 	JobID           string // journal id; default "default"
 
+	// LogFile enables tailable job event logging when non-empty.
+	LogFile string
+	// ProgressInterval is the stderr/file progress ticker period; 0 disables.
+	ProgressInterval time.Duration
+	// LogToStderr mirrors non-progress events to stderr (typically -v).
+	LogToStderr bool
+
 	// Test hooks (nil in production).
 	TestAfterFile    func(rel, status string)
 	TestBeforeCommit func(rel string)
@@ -63,10 +71,12 @@ type fileResult struct {
 	bytes, wired, reused, sent int64
 	elapsed                    time.Duration
 	compressRatio              float64
+	attempts                   int
 	err                        error
 }
 
 func Run(ctx context.Context, cfg Config) (Stats, error) {
+	started := time.Now()
 	if cfg.MaxFileAttempts <= 0 {
 		cfg.MaxFileAttempts = 5
 	}
@@ -80,6 +90,20 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 	dstEP, err := transport.ParseEndpoint(cfg.Dest)
 	if err != nil {
 		return Stats{}, err
+	}
+
+	var rep *progress.Reporter
+	if cfg.LogFile != "" {
+		rep, err = progress.Open(cfg.LogFile, progress.Options{
+			AlsoLatest:       true,
+			Stderr:           os.Stderr,
+			MirrorActions:    cfg.LogToStderr || cfg.Verbose,
+			ProgressToStderr: true,
+		})
+		if err != nil {
+			return Stats{}, fmt.Errorf("open log: %w", err)
+		}
+		defer func() { _ = rep.Close() }()
 	}
 
 	src, err := openTransport(ctx, srcEP, cfg.Insecure)
@@ -121,6 +145,7 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 		return Stats{}, err
 	}
 	walkOK := true
+	filesTotal := int64(len(srcFiles))
 
 	sample := make([]byte, 0, 64*1024)
 	for _, f := range srcFiles {
@@ -138,9 +163,18 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 		break
 	}
 	prof := tuner.Probe(sample, 10)
-	if cfg.Verbose {
-		fmt.Fprintf(os.Stderr, "autotune profile: streams=%d compress=%s frame=%d cdc=%d\n",
-			prof.Streams, prof.Compress, prof.FrameSize, prof.CDCAvg)
+
+	mode := "copy"
+	if cfg.SyncMode {
+		mode = "sync"
+	}
+	workers := prof.Streams
+	if workers < 1 {
+		workers = 1
+	}
+	if rep != nil {
+		rep.JobStart(cfg.JobID, cfg.Source, cfg.Dest, mode, workers)
+		rep.Probe(prof.Streams, prof.Compress.String(), prof.FrameSize, prof.CDCAvg)
 	}
 
 	type job struct{ meta transport.FileMeta }
@@ -152,9 +186,11 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 
 	var stats Stats
 	var wg sync.WaitGroup
-	workers := prof.Streams
-	if workers < 1 {
-		workers = 1
+
+	tickCtx, tickCancel := context.WithCancel(ctx)
+	defer tickCancel()
+	if rep != nil && cfg.ProgressInterval > 0 {
+		go progressTicker(tickCtx, rep, &stats, filesTotal, started, cfg.ProgressInterval)
 	}
 
 	for i := 0; i < workers; i++ {
@@ -174,7 +210,16 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 				atomic.AddInt64(&stats.BytesWired, res.wired)
 				atomic.AddInt64(&stats.ChunksReused, res.reused)
 				atomic.AddInt64(&stats.ChunksSent, res.sent)
-				if res.err != nil && cfg.Verbose {
+				if rep != nil {
+					switch {
+					case res.skipped > 0:
+						rep.FileSkip(j.meta.RelPath)
+					case res.copied > 0:
+						rep.FileOK(j.meta.RelPath, res.bytes, res.wired, res.reused, res.sent, res.elapsed)
+					default:
+						rep.FileFail(j.meta.RelPath, res.err, res.attempts)
+					}
+				} else if res.err != nil && cfg.Verbose {
 					fmt.Fprintf(os.Stderr, "warn %s: %v\n", j.meta.RelPath, res.err)
 				}
 				if cfg.TestAfterFile != nil {
@@ -203,18 +248,36 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 		}()
 	}
 	wg.Wait()
+	tickCancel()
 	_ = tuner.Save()
 
 	if cfg.SyncMode && cfg.Delete && !cfg.DryRun {
 		if ctx.Err() == nil && stats.FilesFailed == 0 && walkOK {
-			deleted, err := deleteExtras(ctx, srcFiles, dst)
+			deleted, err := deleteExtras(ctx, srcFiles, dst, rep)
 			stats.FilesDeleted = deleted
 			if err != nil {
+				if rep != nil {
+					rep.Warn("delete failed", progress.ErrField(err))
+					rep.JobEnd(false, stats.FilesCopied, stats.FilesSkipped, stats.FilesFailed, stats.FilesDeleted, stats.BytesCopied, time.Since(started))
+				}
 				return stats, err
 			}
+			if rep != nil && deleted > 0 {
+				rep.DeleteSummary(deleted)
+			}
+		} else if rep != nil {
+			rep.Warn("skip --delete",
+				progress.Int("failed", stats.FilesFailed),
+				progress.Str("ctx", fmt.Sprint(ctx.Err())),
+			)
 		} else if cfg.Verbose {
 			fmt.Fprintf(os.Stderr, "skip --delete: job not clean (failed=%d ctx=%v)\n", stats.FilesFailed, ctx.Err())
 		}
+	}
+
+	ok := stats.FilesFailed == 0 && ctx.Err() == nil
+	if rep != nil {
+		rep.JobEnd(ok, stats.FilesCopied, stats.FilesSkipped, stats.FilesFailed, stats.FilesDeleted, stats.BytesCopied, time.Since(started))
 	}
 	if stats.FilesFailed > 0 {
 		return stats, fmt.Errorf("%d file(s) failed", stats.FilesFailed)
@@ -223,6 +286,33 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 		return stats, err
 	}
 	return stats, nil
+}
+
+func progressTicker(ctx context.Context, rep *progress.Reporter, stats *Stats, filesTotal int64, started time.Time, interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	var lastBytes int64
+	lastAt := started
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-t.C:
+			copied := atomic.LoadInt64(&stats.FilesCopied)
+			skipped := atomic.LoadInt64(&stats.FilesSkipped)
+			failed := atomic.LoadInt64(&stats.FilesFailed)
+			bytes := atomic.LoadInt64(&stats.BytesCopied)
+			done := copied + skipped + failed
+			elapsed := now.Sub(lastAt).Seconds()
+			var rate int64
+			if elapsed > 0 {
+				rate = int64(float64(bytes-lastBytes) / elapsed)
+			}
+			lastBytes = bytes
+			lastAt = now
+			rep.Progress(done, filesTotal, copied, skipped, failed, bytes, rate)
+		}
+	}
 }
 
 func transferOne(
@@ -240,10 +330,10 @@ func transferOne(
 		attempts++
 		n, wired, reused, sent, status, elapsed, ratio, err := tryTransfer(ctx, cfg, src, dst, meta, journ, idx, tuner, limiter)
 		if status == "skipped" {
-			return fileResult{skipped: 1, elapsed: elapsed}
+			return fileResult{skipped: 1, elapsed: elapsed, attempts: attempts}
 		}
 		if status == "ok" {
-			return fileResult{copied: 1, bytes: n, wired: wired, reused: reused, sent: sent, elapsed: elapsed, compressRatio: ratio}
+			return fileResult{copied: 1, bytes: n, wired: wired, reused: reused, sent: sent, elapsed: elapsed, compressRatio: ratio, attempts: attempts}
 		}
 		if err != nil && isUnstable(err) {
 			if cfg.SkipUnstable || attempts >= cfg.MaxFileAttempts {
@@ -253,10 +343,10 @@ func transferOne(
 						Attempts: attempts, LastError: err.Error(),
 					})
 				}
-				return fileResult{failed: 1, err: err, elapsed: elapsed}
+				return fileResult{failed: 1, err: err, elapsed: elapsed, attempts: attempts}
 			}
 			if err := sleepCtx(ctx, time.Duration(attempts)*200*time.Millisecond); err != nil {
-				return fileResult{failed: 1, err: err}
+				return fileResult{failed: 1, err: err, attempts: attempts}
 			}
 			if nm, e := src.Stat(ctx, meta.RelPath); e == nil {
 				meta = nm
@@ -270,9 +360,9 @@ func transferOne(
 					Attempts: attempts, LastError: err.Error(),
 				})
 			}
-			return fileResult{failed: 1, err: err, elapsed: elapsed}
+			return fileResult{failed: 1, err: err, elapsed: elapsed, attempts: attempts}
 		}
-		return fileResult{failed: 1, err: err, elapsed: elapsed}
+		return fileResult{failed: 1, err: err, elapsed: elapsed, attempts: attempts}
 	}
 }
 
@@ -494,7 +584,7 @@ func stripData(in []chunk.Chunk) []chunk.Chunk {
 	return out
 }
 
-func deleteExtras(ctx context.Context, srcFiles []transport.FileMeta, dst transport.Transport) (int64, error) {
+func deleteExtras(ctx context.Context, srcFiles []transport.FileMeta, dst transport.Transport, rep *progress.Reporter) (int64, error) {
 	keep := map[string]struct{}{}
 	for _, f := range srcFiles {
 		keep[f.RelPath] = struct{}{}
@@ -510,6 +600,9 @@ func deleteExtras(ctx context.Context, srcFiles []transport.FileMeta, dst transp
 		}
 		if err := dst.Remove(ctx, f.RelPath); err != nil {
 			return n, err
+		}
+		if rep != nil {
+			rep.Delete(f.RelPath)
 		}
 		n++
 	}

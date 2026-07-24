@@ -74,6 +74,20 @@ quiksync verify ./src ./dst
 quiksync copy ./src ./dst --dry-run -v
 ```
 
+### Monitor a job
+
+Copy/sync write a tailable event log (on by default):
+
+```bash
+# Terminal A
+quiksync copy ./src ./dst
+
+# Terminal B (or an AI agent watching the file)
+tail -f ./dst/.quiksync/logs/latest.log
+```
+
+Lines are UTC RFC3339 + logfmt (`event=file_ok path=… bytes=…`). stderr also prints a 1s `progress` ticker and `logging to <path>` at start. Use `--log-file PATH` to override the location, or `--no-log` to disable. Remote destinations log under `~/.config/quiksync/logs/` (or `$QUIKSYNC_CONFIG/logs/`).
+
 ### Over SSH
 
 Remote host needs `quiksync` on `PATH`. QuikSync runs `quiksync remote-helper` over SSH stdio (rsync-style).
@@ -125,6 +139,8 @@ quiksync copy ./src ./dst --chunk-size=64K --bwlimit=10485760
 | `--exclude` | — | Glob patterns to skip |
 | `--delete` | false | (`sync` only) remove dest extras; skipped if any file failed |
 | `--insecure` | false | Skip QUIC TOFU pin verification (labs only) |
+| `--log-file` | DEST/.quiksync/logs/… | Tailable job event log path |
+| `--no-log` | false | Disable event logging / progress ticker |
 
 ## How it works
 
@@ -159,6 +175,7 @@ internal/autotune/      Probe + hill-climb optimizer
 internal/compress/      none / lz4 / zstd
 internal/journal/       Crash-safe resume (JSONL)
 internal/index/         Dest signature cache
+internal/progress/      Tailable job event log + progress ticker
 internal/transport/     file · ssh · quiksync (QUIC)
 internal/protocol/      Framed RPC for remote helper / daemon
 ```
@@ -222,7 +239,7 @@ git push origin v0.1.0
 Later:
 
 - S3-compatible object storage (`s3://…`) behind the same transport interface
-- Richer progress UI / host profile tooling
+- Host profile tooling / richer TUI (event log + stderr progress ticker shipped in v0.1)
 - Optional `quiksync watch` for continuous one-way follow
 
 ## License

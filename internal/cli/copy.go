@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/shaneburrell/quiksync/internal/engine"
 	"github.com/spf13/cobra"
@@ -18,6 +19,9 @@ func newCopyCmd() *cobra.Command {
 			cfg, err := buildConfig(args[0], args[1], flags, false)
 			if err != nil {
 				return err
+			}
+			if cfg.LogFile != "" {
+				fmt.Fprintf(os.Stderr, "logging to %s\n", cfg.LogFile)
 			}
 			stats, err := engine.Run(context.Background(), cfg)
 			if err != nil {
@@ -45,6 +49,9 @@ func newSyncCmd() *cobra.Command {
 			cfg, err := buildConfig(args[0], args[1], flags, true)
 			if err != nil {
 				return err
+			}
+			if cfg.LogFile != "" {
+				fmt.Fprintf(os.Stderr, "logging to %s\n", cfg.LogFile)
 			}
 			stats, err := engine.Run(context.Background(), cfg)
 			if err != nil {
