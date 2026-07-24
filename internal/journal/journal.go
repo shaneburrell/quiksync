@@ -63,6 +63,8 @@ func (j *Journal) load() error {
 	}
 	defer func() { _ = f.Close() }()
 	sc := bufio.NewScanner(f)
+	buf := make([]byte, 64*1024)
+	sc.Buffer(buf, 1<<20) // up to 1 MiB per line
 	for sc.Scan() {
 		var e Entry
 		if err := json.Unmarshal(sc.Bytes(), &e); err != nil {
@@ -89,9 +91,16 @@ func (j *Journal) Put(e Entry) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = f.Close() }()
 	enc := json.NewEncoder(f)
-	return enc.Encode(e)
+	if err := enc.Encode(e); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 func (j *Journal) Completed(rel string) bool {

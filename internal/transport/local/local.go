@@ -37,8 +37,8 @@ func (t *Transport) Close() error { return nil }
 
 func (t *Transport) Root() string { return t.root }
 
-func (t *Transport) abs(rel string) string {
-	return filepath.Join(t.root, filepath.FromSlash(rel))
+func (t *Transport) abs(rel string) (string, error) {
+	return transport.SafeJoin(t.root, rel)
 }
 
 func (t *Transport) Walk(ctx context.Context, exclude []string) ([]transport.FileMeta, error) {
@@ -59,7 +59,11 @@ func (t *Transport) Walk(ctx context.Context, exclude []string) ([]transport.Fil
 }
 
 func (t *Transport) Stat(ctx context.Context, rel string) (transport.FileMeta, error) {
-	st, err := os.Stat(t.abs(rel))
+	p, err := t.abs(rel)
+	if err != nil {
+		return transport.FileMeta{}, err
+	}
+	st, err := os.Stat(p)
 	if err != nil {
 		return transport.FileMeta{}, err
 	}
@@ -72,19 +76,35 @@ func (t *Transport) Stat(ctx context.Context, rel string) (transport.FileMeta, e
 }
 
 func (t *Transport) OpenRead(ctx context.Context, rel string) (io.ReadCloser, error) {
-	return os.Open(t.abs(rel))
+	p, err := t.abs(rel)
+	if err != nil {
+		return nil, err
+	}
+	return os.Open(p)
 }
 
 func (t *Transport) Remove(ctx context.Context, rel string) error {
-	return os.Remove(t.abs(rel))
+	p, err := t.abs(rel)
+	if err != nil {
+		return err
+	}
+	return os.Remove(p)
 }
 
 func (t *Transport) MkdirAll(ctx context.Context, rel string) error {
-	return os.MkdirAll(t.abs(rel), 0o755)
+	p, err := t.abs(rel)
+	if err != nil {
+		return err
+	}
+	return os.MkdirAll(p, 0o755)
 }
 
 func (t *Transport) GetSignature(ctx context.Context, rel string) (chunk.FileSignature, error) {
-	f, err := os.Open(t.abs(rel))
+	p, err := t.abs(rel)
+	if err != nil {
+		return chunk.FileSignature{}, err
+	}
+	f, err := os.Open(p)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return chunk.FileSignature{}, nil
@@ -100,15 +120,18 @@ func (t *Transport) GetSignature(ctx context.Context, rel string) (chunk.FileSig
 }
 
 type writeSession struct {
-	destAbs string
-	tempAbs string
-	f       *os.File
-	size    int64
-	written map[uint64]uint32
+	destAbs   string
+	tempAbs   string
+	f         *os.File
+	size      int64
+	committed bool
 }
 
 func (t *Transport) BeginWrite(ctx context.Context, rel string, size int64) (transport.WriteSession, error) {
-	dest := t.abs(rel)
+	dest, err := t.abs(rel)
+	if err != nil {
+		return nil, err
+	}
 	tmpDir := filepath.Join(t.root, ".quiksync.tmp")
 	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
 		return nil, err
@@ -116,7 +139,12 @@ func (t *Transport) BeginWrite(ctx context.Context, rel string, size int64) (tra
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return nil, err
 	}
-	tmp := filepath.Join(tmpDir, filepath.FromSlash(rel)+".partial")
+	tmpRel := filepath.ToSlash(rel) + ".partial"
+	tmp, err := transport.SafeJoin(tmpDir, tmpRel)
+	if err != nil {
+		// Fall back to hashed name under tmpDir if nested rel is awkward.
+		tmp = filepath.Join(tmpDir, filepath.Base(filepath.FromSlash(rel))+".partial")
+	}
 	if err := os.MkdirAll(filepath.Dir(tmp), 0o755); err != nil {
 		return nil, err
 	}
@@ -130,10 +158,13 @@ func (t *Transport) BeginWrite(ctx context.Context, rel string, size int64) (tra
 			return nil, err
 		}
 	}
-	return &writeSession{destAbs: dest, tempAbs: tmp, f: f, size: size, written: map[uint64]uint32{}}, nil
+	return &writeSession{destAbs: dest, tempAbs: tmp, f: f, size: size}, nil
 }
 
 func (w *writeSession) WriteChunk(ctx context.Context, offset uint64, codec compress.Codec, uncompressedLen int, data []byte) error {
+	if w.committed {
+		return fmt.Errorf("write after commit")
+	}
 	raw, err := compress.Decode(codec, data, uncompressedLen)
 	if err != nil {
 		return err
@@ -141,11 +172,13 @@ func (w *writeSession) WriteChunk(ctx context.Context, offset uint64, codec comp
 	if _, err := w.f.WriteAt(raw, int64(offset)); err != nil {
 		return err
 	}
-	w.written[offset] = uint32(len(raw))
 	return nil
 }
 
 func (w *writeSession) Commit(ctx context.Context, expected chunk.Digest, mode os.FileMode, modTime time.Time) error {
+	if w.committed {
+		return nil
+	}
 	if _, err := w.f.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
@@ -156,23 +189,46 @@ func (w *writeSession) Commit(ctx context.Context, expected chunk.Digest, mode o
 	if got != expected {
 		return fmt.Errorf("digest mismatch: got %s want %s", got, expected)
 	}
+	if err := w.f.Sync(); err != nil {
+		return err
+	}
 	if err := w.f.Close(); err != nil {
 		return err
 	}
 	w.f = nil
 	if mode != 0 {
-		_ = os.Chmod(w.tempAbs, mode.Perm())
+		if err := os.Chmod(w.tempAbs, mode.Perm()); err != nil {
+			return fmt.Errorf("chmod: %w", err)
+		}
 	}
 	if !modTime.IsZero() {
-		_ = os.Chtimes(w.tempAbs, modTime, modTime)
+		if err := os.Chtimes(w.tempAbs, modTime, modTime); err != nil {
+			return fmt.Errorf("chtimes: %w", err)
+		}
 	}
-	return os.Rename(w.tempAbs, w.destAbs)
+	if err := os.Rename(w.tempAbs, w.destAbs); err != nil {
+		return err
+	}
+	w.committed = true
+	// Best-effort fsync of parent directory.
+	if dir, err := os.Open(filepath.Dir(w.destAbs)); err == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
+	}
+	return nil
 }
 
 func (w *writeSession) Abort() error {
+	if w.committed {
+		return nil
+	}
 	if w.f != nil {
 		_ = w.f.Close()
 		w.f = nil
 	}
-	return os.Remove(w.tempAbs)
+	err := os.Remove(w.tempAbs)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
 }

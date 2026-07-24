@@ -7,6 +7,15 @@ import (
 	"time"
 )
 
+func TestMatchExcludeWindowsStyle(t *testing.T) {
+	if !matchExclude(`vendor\x.go`, []string{"vendor/*"}) {
+		t.Fatal("expected ToSlash match for windows-style rel")
+	}
+	if matchExclude(`keep.txt`, []string{"vendor/*"}) {
+		t.Fatal("keep should not match")
+	}
+}
+
 func TestWalkExcludeAndSkipQuiksync(t *testing.T) {
 	root := t.TempDir()
 	mustWrite(t, filepath.Join(root, "keep.txt"), "ok")

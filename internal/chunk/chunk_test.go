@@ -6,6 +6,22 @@ import (
 	"testing"
 )
 
+func TestGearTableUnique(t *testing.T) {
+	seen := map[uint32]struct{}{}
+	for i, v := range gear {
+		if v == 0 {
+			t.Fatalf("gear[%d] is zero", i)
+		}
+		if _, ok := seen[v]; ok {
+			t.Fatalf("duplicate gear value at %d: %#x", i, v)
+		}
+		seen[v] = struct{}{}
+	}
+	if len(seen) != 256 {
+		t.Fatalf("want 256 unique, got %d", len(seen))
+	}
+}
+
 func TestChunkReaderDeterministic(t *testing.T) {
 	data := []byte(strings.Repeat("abcdefghijklmnopqrstuvwxyz0123456789\n", 4000))
 	sig1, err := ChunkReader(bytes.NewReader(data), int64(len(data)), Options{KeepData: true})

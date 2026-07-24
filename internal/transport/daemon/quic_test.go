@@ -12,28 +12,18 @@ import (
 )
 
 func TestQUICRoundTrip(t *testing.T) {
+	t.Setenv("QUIKSYNC_CONFIG", t.TempDir())
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "q.txt"), []byte("quic-hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- Serve(ctx, ServeConfig{Listen: "127.0.0.1:0", Root: root})
-	}()
-
-	// Serve with :0 doesn't expose addr easily via our API; use fixed port.
-	cancel()
-	// Restart on fixed high port.
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	defer cancel2()
 	go func() {
 		_ = Serve(ctx2, ServeConfig{Listen: "127.0.0.1:42429", Root: root})
 	}()
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(250 * time.Millisecond)
 
 	ep := transport.Endpoint{Scheme: "quiksync", Host: "127.0.0.1", Port: "42429", Path: root}
 	client, err := Dial(ctx2, ep)

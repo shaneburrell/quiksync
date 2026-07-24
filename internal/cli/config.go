@@ -10,6 +10,11 @@ import (
 	"github.com/shaneburrell/quiksync/internal/engine"
 )
 
+const (
+	minChunkSize = 4 * 1024
+	maxChunkSize = 16 * 1024 * 1024
+)
+
 func buildConfig(src, dest string, f TransferFlags, syncMode bool) (engine.Config, error) {
 	var codec compress.Codec
 	switch strings.ToLower(f.Compress) {
@@ -31,6 +36,12 @@ func buildConfig(src, dest string, f TransferFlags, syncMode bool) (engine.Confi
 		if err != nil {
 			return engine.Config{}, err
 		}
+		if n < minChunkSize || n > maxChunkSize {
+			return engine.Config{}, fmt.Errorf("--chunk-size must be between %d and %d bytes", minChunkSize, maxChunkSize)
+		}
+		if n > int64(^uint32(0)) {
+			return engine.Config{}, fmt.Errorf("--chunk-size too large for uint32")
+		}
 		chunkAvg = uint32(n)
 	}
 
@@ -47,6 +58,7 @@ func buildConfig(src, dest string, f TransferFlags, syncMode bool) (engine.Confi
 		BandwidthLimit:  f.BandwidthLimit,
 		SkipUnstable:    f.SkipUnstable,
 		MaxFileAttempts: f.MaxFileAttempts,
+		Insecure:        f.Insecure,
 		Tune: autotune.Config{
 			Enabled:     f.Auto,
 			Streams:     f.Streams,
@@ -60,20 +72,44 @@ func buildConfig(src, dest string, f TransferFlags, syncMode bool) (engine.Confi
 
 func parseSize(s string) (int64, error) {
 	s = strings.TrimSpace(strings.ToUpper(s))
+	if s == "" {
+		return 0, fmt.Errorf("empty size")
+	}
+	if strings.HasPrefix(s, "-") {
+		return 0, fmt.Errorf("invalid size %q", s)
+	}
 	mult := int64(1)
 	switch {
-	case strings.HasSuffix(s, "K"), strings.HasSuffix(s, "KB"):
-		s = strings.TrimSuffix(strings.TrimSuffix(s, "B"), "K")
+	case strings.HasSuffix(s, "KIB"):
+		s = strings.TrimSuffix(s, "KIB")
 		mult = 1024
-	case strings.HasSuffix(s, "M"), strings.HasSuffix(s, "MB"):
-		s = strings.TrimSuffix(strings.TrimSuffix(s, "B"), "M")
+	case strings.HasSuffix(s, "MIB"):
+		s = strings.TrimSuffix(s, "MIB")
 		mult = 1024 * 1024
-	case strings.HasSuffix(s, "G"), strings.HasSuffix(s, "GB"):
-		s = strings.TrimSuffix(strings.TrimSuffix(s, "B"), "G")
+	case strings.HasSuffix(s, "GIB"):
+		s = strings.TrimSuffix(s, "GIB")
+		mult = 1024 * 1024 * 1024
+	case strings.HasSuffix(s, "KB"):
+		s = strings.TrimSuffix(s, "KB")
+		mult = 1024
+	case strings.HasSuffix(s, "MB"):
+		s = strings.TrimSuffix(s, "MB")
+		mult = 1024 * 1024
+	case strings.HasSuffix(s, "GB"):
+		s = strings.TrimSuffix(s, "GB")
+		mult = 1024 * 1024 * 1024
+	case strings.HasSuffix(s, "K"):
+		s = strings.TrimSuffix(s, "K")
+		mult = 1024
+	case strings.HasSuffix(s, "M"):
+		s = strings.TrimSuffix(s, "M")
+		mult = 1024 * 1024
+	case strings.HasSuffix(s, "G"):
+		s = strings.TrimSuffix(s, "G")
 		mult = 1024 * 1024 * 1024
 	}
-	n, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
+	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	if err != nil || n < 0 {
 		return 0, fmt.Errorf("invalid size %q", s)
 	}
 	return n * mult, nil

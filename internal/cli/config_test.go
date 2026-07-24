@@ -14,7 +14,9 @@ func TestParseSize(t *testing.T) {
 	}{
 		{"1024", 1024},
 		{"64K", 64 * 1024},
+		{"64KiB", 64 * 1024},
 		{"1MB", 1024 * 1024},
+		{"1MiB", 1024 * 1024},
 		{"2G", 2 * 1024 * 1024 * 1024},
 	}
 	for _, tc := range cases {
@@ -25,6 +27,12 @@ func TestParseSize(t *testing.T) {
 	}
 	if _, err := parseSize("nope"); err == nil {
 		t.Fatal("expected error")
+	}
+	if _, err := parseSize("-1K"); err == nil {
+		t.Fatal("expected negative rejection")
+	}
+	if _, err := buildConfig("/s", "/d", TransferFlags{Compress: "none", ChunkSize: "1K"}, false); err == nil {
+		t.Fatal("expected chunk-size too small")
 	}
 }
 

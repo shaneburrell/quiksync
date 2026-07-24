@@ -2,14 +2,9 @@ package daemon
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"crypto/tls"
-	"crypto/x509"
-	"encoding/pem"
 	"fmt"
 	"io"
-	"math/big"
 	"net"
 	"os"
 	"sync"
@@ -25,7 +20,7 @@ import (
 
 // Serve starts a QUIC listener and serves remote-helper sessions.
 func Serve(ctx context.Context, cfg ServeConfig) error {
-	tlsConf, err := loadOrGenerateTLS(cfg.CertFile, cfg.KeyFile)
+	tlsConf, err := loadOrCreatePinnedTLS(cfg.CertFile, cfg.KeyFile)
 	if err != nil {
 		return err
 	}
@@ -57,17 +52,33 @@ func handleConn(ctx context.Context, conn *quic.Conn, defaultRoot string) {
 			return
 		}
 		go func(s *quic.Stream) {
-			defer func() { _ = s.Close() }()
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Fprintf(os.Stderr, "quiksync serve: stream panic: %v\n", r)
+				}
+				_ = s.Close()
+			}()
 			_ = RunRemoteHelperRoot(ctx, s, s, defaultRoot)
 		}(stream)
 	}
 }
 
-// Dial connects to a quiksync:// endpoint over QUIC.
+// DialOptions configures QUIC client dialing.
+type DialOptions struct {
+	Insecure bool // skip TOFU pin verification (labs only)
+}
+
+// Dial connects to a quiksync:// endpoint over QUIC with TOFU pinning.
 func Dial(ctx context.Context, ep transport.Endpoint) (*Client, error) {
+	return DialOpts(ctx, ep, DialOptions{})
+}
+
+// DialOpts is Dial with options.
+func DialOpts(ctx context.Context, ep transport.Endpoint, opts DialOptions) (*Client, error) {
 	addr := net.JoinHostPort(ep.Host, ep.Port)
 	tlsConf := &tls.Config{
-		InsecureSkipVerify: true, // TOFU-style for v1; pin later
+		InsecureSkipVerify: true, // custom VerifyConnection performs TOFU
+		VerifyConnection:   verifyTOFU(addr, opts.Insecure),
 		NextProtos:         []string{"quiksync"},
 	}
 	conn, err := quic.DialAddr(ctx, addr, tlsConf, &quic.Config{
@@ -83,7 +94,8 @@ func Dial(ctx context.Context, ep transport.Endpoint) (*Client, error) {
 		return nil, err
 	}
 	c := &Client{ep: ep, conn: conn, stream: stream}
-	if err := protocol.WriteJSON(c.stream, protocol.MsgHello, protocol.Hello{Version: "1", Root: ep.Path}); err != nil {
+	// Server --root is authoritative; send empty Root.
+	if err := protocol.WriteJSON(c.stream, protocol.MsgHello, protocol.Hello{Version: "1", Root: ""}); err != nil {
 		_ = c.Close()
 		return nil, err
 	}
@@ -133,7 +145,7 @@ func (c *Client) Walk(ctx context.Context, exclude []string) ([]transport.FileMe
 		return nil, err
 	}
 	if typ != protocol.MsgWalkOK {
-		return nil, fmt.Errorf("walk failed")
+		return nil, remoteErr(typ, payload)
 	}
 	var ok protocol.WalkOK
 	if err := protocol.DecodeJSON(payload, &ok); err != nil {
@@ -159,7 +171,7 @@ func (c *Client) Stat(ctx context.Context, rel string) (transport.FileMeta, erro
 		return transport.FileMeta{}, err
 	}
 	if typ != protocol.MsgStatOK {
-		return transport.FileMeta{}, fmt.Errorf("stat failed")
+		return transport.FileMeta{}, remoteErr(typ, payload)
 	}
 	var f protocol.FileMeta
 	if err := protocol.DecodeJSON(payload, &f); err != nil {
@@ -175,13 +187,14 @@ func (c *Client) OpenRead(ctx context.Context, rel string) (io.ReadCloser, error
 		return nil, err
 	}
 	// Hold lock until reader drained via lockedReader.
-	return &lockedStreamReader{c: c}, nil
+	return &lockedStreamReader{c: c, locked: true}, nil
 }
 
 type lockedStreamReader struct {
-	c    *Client
-	left []byte
-	eof  bool
+	c      *Client
+	left   []byte
+	eof    bool
+	locked bool
 }
 
 func (r *lockedStreamReader) Read(p []byte) (int, error) {
@@ -201,6 +214,12 @@ func (r *lockedStreamReader) Read(p []byte) (int, error) {
 		r.eof = true
 		return 0, io.EOF
 	}
+	if typ == protocol.MsgErr {
+		var em protocol.ErrMsg
+		_ = protocol.DecodeJSON(payload, &em)
+		r.eof = true
+		return 0, fmt.Errorf("%s", em.Error)
+	}
 	if typ != protocol.MsgReadData {
 		return 0, fmt.Errorf("unexpected %d", typ)
 	}
@@ -212,7 +231,7 @@ func (r *lockedStreamReader) Read(p []byte) (int, error) {
 }
 
 func (r *lockedStreamReader) Close() error {
-	// Drain to MsgOK if needed, then unlock.
+	var firstErr error
 	for !r.eof {
 		buf := make([]byte, 64*1024)
 		_, err := r.Read(buf)
@@ -220,12 +239,15 @@ func (r *lockedStreamReader) Close() error {
 			break
 		}
 		if err != nil {
-			r.c.mu.Unlock()
-			return err
+			firstErr = err
+			break
 		}
 	}
-	r.c.mu.Unlock()
-	return nil
+	if r.locked {
+		r.c.mu.Unlock()
+		r.locked = false
+	}
+	return firstErr
 }
 
 func (c *Client) Remove(ctx context.Context, rel string) error {
@@ -257,7 +279,7 @@ func (c *Client) GetSignature(ctx context.Context, rel string) (chunk.FileSignat
 		return chunk.FileSignature{}, err
 	}
 	if typ != protocol.MsgSigOK {
-		return chunk.FileSignature{}, fmt.Errorf("sig failed")
+		return chunk.FileSignature{}, remoteErr(typ, payload)
 	}
 	var s protocol.SigOK
 	if err := protocol.DecodeJSON(payload, &s); err != nil {
@@ -266,7 +288,11 @@ func (c *Client) GetSignature(ctx context.Context, rel string) (chunk.FileSignat
 	return chunk.FileSignature{Size: s.Size, Digest: s.Digest, Chunks: s.Chunks}, nil
 }
 
-type clientWrite struct{ c *Client }
+type clientWrite struct {
+	c         *Client
+	committed bool
+	holding   bool // c.mu held for session lifetime
+}
 
 func (c *Client) BeginWrite(ctx context.Context, rel string, size int64) (transport.WriteSession, error) {
 	c.mu.Lock()
@@ -278,10 +304,15 @@ func (c *Client) BeginWrite(ctx context.Context, rel string, size int64) (transp
 		c.mu.Unlock()
 		return nil, err
 	}
-	return &clientWrite{c: c}, nil
+	// Hold session lock until Commit/Abort so concurrent workers cannot interleave
+	// on the single helper write session.
+	return &clientWrite{c: c, holding: true}, nil
 }
 
 func (w *clientWrite) WriteChunk(ctx context.Context, offset uint64, codec compress.Codec, uncompressedLen int, data []byte) error {
+	if w.committed {
+		return fmt.Errorf("write after commit")
+	}
 	if err := protocol.WriteJSON(w.c.stream, protocol.MsgWriteChunk, protocol.WriteChunkReq{
 		Offset: offset, Codec: codec, UncompressedLen: uncompressedLen, Data: data,
 	}); err != nil {
@@ -291,19 +322,38 @@ func (w *clientWrite) WriteChunk(ctx context.Context, offset uint64, codec compr
 }
 
 func (w *clientWrite) Commit(ctx context.Context, expected chunk.Digest, mode os.FileMode, modTime time.Time) error {
-	defer w.c.mu.Unlock()
+	if w.committed {
+		return nil
+	}
 	if err := protocol.WriteJSON(w.c.stream, protocol.MsgCommit, protocol.CommitReq{
 		Digest: expected, Mode: uint32(mode), ModNano: modTime.UnixNano(),
 	}); err != nil {
 		return err
 	}
-	return expectOK(w.c.stream)
+	if err := expectOK(w.c.stream); err != nil {
+		return err
+	}
+	w.committed = true
+	w.release()
+	return nil
 }
 
 func (w *clientWrite) Abort() error {
-	defer w.c.mu.Unlock()
+	if w.committed {
+		return nil
+	}
+	defer w.release()
 	_ = protocol.WriteMsg(w.c.stream, protocol.MsgAbort, nil)
-	return expectOK(w.c.stream)
+	err := expectOK(w.c.stream)
+	w.committed = true
+	return err
+}
+
+func (w *clientWrite) release() {
+	if w.holding {
+		w.holding = false
+		w.c.mu.Unlock()
+	}
 }
 
 func expectOK(r io.Reader) error {
@@ -314,48 +364,16 @@ func expectOK(r io.Reader) error {
 	if typ == protocol.MsgOK {
 		return nil
 	}
+	return remoteErr(typ, payload)
+}
+
+func remoteErr(typ protocol.MsgType, payload []byte) error {
 	if typ == protocol.MsgErr {
 		var em protocol.ErrMsg
 		_ = protocol.DecodeJSON(payload, &em)
 		return fmt.Errorf("%s", em.Error)
 	}
-	return fmt.Errorf("unexpected type %d", typ)
-}
-
-func loadOrGenerateTLS(certFile, keyFile string) (*tls.Config, error) {
-	if certFile != "" && keyFile != "" {
-		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-		if err != nil {
-			return nil, err
-		}
-		return &tls.Config{Certificates: []tls.Certificate{cert}}, nil
-	}
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		return nil, err
-	}
-	template := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(365 * 24 * time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-	}
-	der, err := x509.CreateCertificate(rand.Reader, template, template, priv.Public(), priv)
-	if err != nil {
-		return nil, err
-	}
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	keyBytes, err := x509.MarshalPKCS8PrivateKey(priv)
-	if err != nil {
-		return nil, err
-	}
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyBytes})
-	cert, err := tls.X509KeyPair(certPEM, keyPEM)
-	if err != nil {
-		return nil, err
-	}
-	return &tls.Config{Certificates: []tls.Certificate{cert}}, nil
+	return fmt.Errorf("unexpected message type %d", typ)
 }
 
 // Ensure local package linkage for root defaulting in serve.

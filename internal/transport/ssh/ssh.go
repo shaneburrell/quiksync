@@ -27,7 +27,7 @@ type Transport struct {
 	mu     sync.Mutex
 }
 
-func New(ep transport.Endpoint) (*Transport, error) {
+func New(ctx context.Context, ep transport.Endpoint) (*Transport, error) {
 	target := ep.Host
 	if ep.User != "" {
 		target = ep.User + "@" + ep.Host
@@ -37,8 +37,7 @@ func New(ep transport.Endpoint) (*Transport, error) {
 		args = append(args, "-p", ep.Port)
 	}
 	args = append(args, target, "quiksync", "remote-helper")
-	// Prefer remote-helper with root via env; pass root as first protocol hello.
-	cmd := exec.Command(Command, args...)
+	cmd := exec.CommandContext(ctx, Command, args...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -250,7 +249,9 @@ func (t *Transport) GetSignature(ctx context.Context, rel string) (chunk.FileSig
 }
 
 type writeSession struct {
-	t *Transport
+	t         *Transport
+	committed bool
+	holding   bool
 }
 
 func (t *Transport) BeginWrite(ctx context.Context, rel string, size int64) (transport.WriteSession, error) {
@@ -263,10 +264,13 @@ func (t *Transport) BeginWrite(ctx context.Context, rel string, size int64) (tra
 		t.mu.Unlock()
 		return nil, err
 	}
-	return &writeSession{t: t}, nil
+	return &writeSession{t: t, holding: true}, nil
 }
 
 func (w *writeSession) WriteChunk(ctx context.Context, offset uint64, codec compress.Codec, uncompressedLen int, data []byte) error {
+	if w.committed {
+		return fmt.Errorf("write after commit")
+	}
 	if err := protocol.WriteJSON(w.t.stdin, protocol.MsgWriteChunk, protocol.WriteChunkReq{
 		Offset: offset, Codec: codec, UncompressedLen: uncompressedLen, Data: data,
 	}); err != nil {
@@ -276,19 +280,38 @@ func (w *writeSession) WriteChunk(ctx context.Context, offset uint64, codec comp
 }
 
 func (w *writeSession) Commit(ctx context.Context, expected chunk.Digest, mode os.FileMode, modTime time.Time) error {
-	defer w.t.mu.Unlock()
+	if w.committed {
+		return nil
+	}
 	if err := protocol.WriteJSON(w.t.stdin, protocol.MsgCommit, protocol.CommitReq{
 		Digest: expected, Mode: uint32(mode), ModNano: modTime.UnixNano(),
 	}); err != nil {
 		return err
 	}
-	return expectOK(w.t.stdout)
+	if err := expectOK(w.t.stdout); err != nil {
+		return err
+	}
+	w.committed = true
+	w.release()
+	return nil
 }
 
 func (w *writeSession) Abort() error {
-	defer w.t.mu.Unlock()
+	if w.committed {
+		return nil
+	}
+	defer w.release()
 	_ = protocol.WriteMsg(w.t.stdin, protocol.MsgAbort, nil)
-	return expectOK(w.t.stdout)
+	err := expectOK(w.t.stdout)
+	w.committed = true
+	return err
+}
+
+func (w *writeSession) release() {
+	if w.holding {
+		w.holding = false
+		w.t.mu.Unlock()
+	}
 }
 
 func expectOK(r io.Reader) error {

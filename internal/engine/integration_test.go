@@ -96,7 +96,7 @@ func TestTrueResumeFromJournal(t *testing.T) {
 	})
 	_ = err // may be nil; cancel aborts remaining workers
 
-	j, err := journal.Open(dst, "resume")
+	j, err := journal.Open(dst, "default")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,8 +142,8 @@ func TestLiveChangeBeforeCommit(t *testing.T) {
 			_ = os.Chtimes(path, now, now)
 		},
 	})
-	if err != nil {
-		t.Fatalf("run: %v", err)
+	if err == nil {
+		t.Fatal("expected error when file fails")
 	}
 	if stats.FilesFailed != 1 {
 		t.Fatalf("expected failed unstable file, got %+v", stats)

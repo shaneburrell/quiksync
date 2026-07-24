@@ -14,6 +14,47 @@ import (
 	"github.com/shaneburrell/quiksync/internal/protocol"
 )
 
+func TestOpenReadMissingNoStrayOK(t *testing.T) {
+	root := t.TempDir()
+	clientR, serverW := io.Pipe()
+	serverR, clientW := io.Pipe()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- RunRemoteHelperRoot(context.Background(), serverR, serverW, root)
+	}()
+	if err := protocol.WriteJSON(clientW, protocol.MsgHello, protocol.Hello{Version: "1", Root: root}); err != nil {
+		t.Fatal(err)
+	}
+	if typ, _, err := protocol.ReadMsg(clientR); err != nil || typ != protocol.MsgHelloOK {
+		t.Fatalf("hello typ=%v err=%v", typ, err)
+	}
+	if err := protocol.WriteJSON(clientW, protocol.MsgOpenRead, protocol.PathReq{Rel: "missing.txt"}); err != nil {
+		t.Fatal(err)
+	}
+	typ, _, err := protocol.ReadMsg(clientR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if typ != protocol.MsgErr {
+		t.Fatalf("want MsgErr, got %d", typ)
+	}
+	// Next RPC must still work (no protocol desync / stray MsgOK).
+	if err := protocol.WriteJSON(clientW, protocol.MsgWalk, protocol.WalkReq{}); err != nil {
+		t.Fatal(err)
+	}
+	typ, _, err = protocol.ReadMsg(clientR)
+	if err != nil || typ != protocol.MsgWalkOK {
+		t.Fatalf("walk after err: typ=%d err=%v", typ, err)
+	}
+	_ = protocol.WriteMsg(clientW, protocol.MsgBye, nil)
+	_ = clientW.Close()
+	select {
+	case <-errCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("helper timeout")
+	}
+}
+
 func TestRemoteHelperCopy(t *testing.T) {
 	root := t.TempDir()
 	srcFile := filepath.Join(root, "in.txt")

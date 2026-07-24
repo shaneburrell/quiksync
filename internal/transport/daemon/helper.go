@@ -31,9 +31,11 @@ func RunRemoteHelperRoot(ctx context.Context, r io.Reader, w io.Writer, defaultR
 	if err := protocol.DecodeJSON(payload, &hello); err != nil {
 		return err
 	}
-	root := hello.Root
+	// Daemon (--root / defaultRoot): always use server root; ignore client absolute Root.
+	// SSH remote-helper (no defaultRoot): use Hello.Root from client.
+	root := defaultRoot
 	if root == "" {
-		root = defaultRoot
+		root = hello.Root
 	}
 	if root == "" {
 		if v := os.Getenv("QUIKSYNC_ROOT"); v != "" {
@@ -102,6 +104,7 @@ func RunRemoteHelperRoot(ctx context.Context, r io.Reader, w io.Writer, defaultR
 				continue
 			}
 			buf := make([]byte, 64*1024)
+			readErr := error(nil)
 			for {
 				n, err := rc.Read(buf)
 				if n > 0 {
@@ -114,21 +117,26 @@ func RunRemoteHelperRoot(ctx context.Context, r io.Reader, w io.Writer, defaultR
 					break
 				}
 				if err != nil {
-					_ = rc.Close()
-					_ = writeErr(w, err)
+					readErr = err
 					break
 				}
 			}
 			_ = rc.Close()
+			if readErr != nil {
+				_ = writeErr(w, readErr)
+				continue // do not send MsgOK after MsgErr
+			}
 			_ = protocol.WriteJSON(w, protocol.MsgOK, protocol.OK{OK: true})
 		case protocol.MsgBeginWrite:
 			var req protocol.BeginWriteReq
 			_ = protocol.DecodeJSON(payload, &req)
 			if session != nil {
 				_ = session.Abort()
+				session = nil
 			}
 			session, err = lt.BeginWrite(ctx, req.Rel, req.Size)
 			if err != nil {
+				session = nil
 				_ = writeErr(w, err)
 				continue
 			}
@@ -141,6 +149,8 @@ func RunRemoteHelperRoot(ctx context.Context, r io.Reader, w io.Writer, defaultR
 			var req protocol.WriteChunkReq
 			_ = protocol.DecodeJSON(payload, &req)
 			if err := session.WriteChunk(ctx, req.Offset, req.Codec, req.UncompressedLen, req.Data); err != nil {
+				_ = session.Abort()
+				session = nil
 				_ = writeErr(w, err)
 				continue
 			}

@@ -2,6 +2,7 @@ package daemon_test
 
 import (
 	"context"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 )
 
 func TestQUICEngineCopy(t *testing.T) {
+	t.Setenv("QUIKSYNC_CONFIG", t.TempDir())
 	root := t.TempDir()
 	src := t.TempDir()
 	if err := os.WriteFile(filepath.Join(src, "hello.txt"), []byte("quic-e2e-payload"), 0o644); err != nil {
@@ -29,14 +31,19 @@ func TestQUICEngineCopy(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	const addr = "127.0.0.1:42431"
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- daemon.Serve(ctx, daemon.ServeConfig{Listen: addr, Root: root})
 	}()
 	time.Sleep(250 * time.Millisecond)
 
-	destURL := url.URL{Scheme: "quiksync", Host: "127.0.0.1:42431", Path: root}
+	destURL := url.URL{Scheme: "quiksync", Host: addr, Path: "/"}
 	dest := destURL.String()
 	stats, err := engine.Run(context.Background(), engine.Config{
 		Source: src,

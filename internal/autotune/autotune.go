@@ -16,7 +16,7 @@ type Config struct {
 	Enabled     bool
 	Streams     int // 0 = auto
 	Compress    compress.Codec
-	ChunkAvg    uint32 // 0 = auto
+	ChunkAvg    uint32 // 0 = auto; pins CDC for the job
 	ProfilePath string
 }
 
@@ -24,7 +24,8 @@ type Config struct {
 type Profile struct {
 	Streams   int            `json:"streams"`
 	Window    int            `json:"window"`
-	FrameSize uint32         `json:"frame_size"`
+	FrameSize uint32         `json:"frame_size"` // wire frame hint
+	CDCAvg    uint32         `json:"cdc_avg"`    // pinned CDC avg for the job
 	Compress  compress.Codec `json:"compress"`
 	Goodput   float64        `json:"goodput"`
 	Auto      bool           `json:"auto"`
@@ -33,6 +34,7 @@ type Profile struct {
 // Sample is a telemetry interval.
 type Sample struct {
 	BytesVerified int64
+	BytesWired    int64
 	Elapsed       time.Duration
 	RTTMs         float64
 	ErrorRate     float64
@@ -47,10 +49,12 @@ type Tuner struct {
 	profile  Profile
 	prev     Profile
 	bytes    int64
+	wired    int64
 	started  time.Time
 	lastTune time.Time
 	step     int
 	hostKey  string
+	cdcPin   uint32 // fixed for job lifetime
 }
 
 func New(cfg Config, hostKey string) *Tuner {
@@ -58,6 +62,7 @@ func New(cfg Config, hostKey string) *Tuner {
 		Streams:   4,
 		Window:    16,
 		FrameSize: 64 * 1024,
+		CDCAvg:    64 * 1024,
 		Compress:  compress.CodecNone,
 		Auto:      cfg.Enabled,
 	}
@@ -66,6 +71,7 @@ func New(cfg Config, hostKey string) *Tuner {
 	}
 	if cfg.ChunkAvg > 0 {
 		p.FrameSize = cfg.ChunkAvg
+		p.CDCAvg = cfg.ChunkAvg
 	}
 	if cfg.Compress != compress.CodecAuto {
 		p.Compress = cfg.Compress
@@ -76,6 +82,7 @@ func New(cfg Config, hostKey string) *Tuner {
 		started:  time.Now(),
 		lastTune: time.Now(),
 		hostKey:  hostKey,
+		cdcPin:   p.CDCAvg,
 	}
 	if path := t.profilePath(); path != "" {
 		if loaded, err := LoadProfile(path); err == nil {
@@ -83,13 +90,21 @@ func New(cfg Config, hostKey string) *Tuner {
 				p.Streams = loaded.Streams
 			}
 			if cfg.ChunkAvg == 0 {
-				p.FrameSize = loaded.FrameSize
+				if loaded.CDCAvg > 0 {
+					p.CDCAvg = loaded.CDCAvg
+				} else if loaded.FrameSize > 0 {
+					p.CDCAvg = loaded.FrameSize
+				}
+				if loaded.FrameSize > 0 {
+					p.FrameSize = loaded.FrameSize
+				}
 			}
 			if cfg.Compress == compress.CodecAuto {
 				p.Compress = loaded.Compress
 			}
 			p.Window = loaded.Window
 			t.profile = p
+			t.cdcPin = p.CDCAvg
 		}
 	}
 	return t
@@ -129,18 +144,24 @@ func (t *Tuner) Probe(sample []byte, rttMs float64) Profile {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if !t.cfg.Enabled {
+		t.profile.CDCAvg = t.cdcPin
 		return t.profile
 	}
 
 	streamsCandidates := []int{1, 2, 4, 8}
-	if rttMs > 80 {
+	if t.cfg.Streams > 0 {
+		streamsCandidates = []int{t.cfg.Streams}
+	} else if rttMs > 80 {
 		streamsCandidates = []int{4, 8, 16}
 	} else if rttMs < 5 {
 		streamsCandidates = []int{1, 2, 4}
 	}
 
 	frameCandidates := []uint32{16 * 1024, 64 * 1024, 256 * 1024}
-	if rttMs > 100 {
+	if t.cfg.ChunkAvg > 0 {
+		// Pin CDC; still evaluate wire frame sizes separately from CDC.
+		frameCandidates = []uint32{16 * 1024, 64 * 1024, 256 * 1024}
+	} else if rttMs > 100 {
 		frameCandidates = []uint32{16 * 1024, 64 * 1024}
 	}
 
@@ -161,16 +182,8 @@ func (t *Tuner) Probe(sample []byte, rttMs float64) Profile {
 	best := t.profile
 	bestScore := -1.0
 	for _, s := range streamsCandidates {
-		if t.cfg.Streams > 0 {
-			s = t.cfg.Streams
-		}
 		for _, f := range frameCandidates {
-			if t.cfg.ChunkAvg > 0 {
-				f = t.cfg.ChunkAvg
-			}
 			for _, c := range codecCandidates {
-				// Heuristic score: streams help with RTT; compression helps when ratio high;
-				// large frames help on clean LAN.
 				ratio := 1.0
 				if c != compress.CodecNone {
 					ratio = compress.SampleRatio(c, sample)
@@ -190,41 +203,48 @@ func (t *Tuner) Probe(sample []byte, rttMs float64) Profile {
 				score := bdpFactor * frameFactor * ratio / cpuCost
 				if score > bestScore {
 					bestScore = score
+					cdc := t.cdcPin
+					if t.cfg.ChunkAvg > 0 {
+						cdc = t.cfg.ChunkAvg
+					} else if cdc == 0 {
+						cdc = f
+					}
 					best = Profile{
 						Streams:   s,
 						Window:    max(8, s*4),
 						FrameSize: f,
+						CDCAvg:    cdc,
 						Compress:  c,
 						Auto:      true,
 						Goodput:   score,
 					}
 				}
-				if t.cfg.ChunkAvg > 0 {
-					break
-				}
 			}
-			if t.cfg.Streams > 0 {
-				break
-			}
-		}
-		if t.cfg.Streams > 0 {
-			break
 		}
 	}
+	if t.cfg.ChunkAvg > 0 {
+		best.CDCAvg = t.cfg.ChunkAvg
+	} else if best.CDCAvg == 0 {
+		best.CDCAvg = best.FrameSize
+	}
+	t.cdcPin = best.CDCAvg
 	t.profile = best
 	t.prev = best
 	return best
 }
 
 // Observe updates rolling goodput and optionally nudges knobs.
+// CDCAvg is never changed mid-job.
 func (t *Tuner) Observe(s Sample) Profile {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.bytes += s.BytesVerified
+	t.wired += s.BytesWired
 	elapsed := time.Since(t.started).Seconds()
 	if elapsed > 0 {
 		t.profile.Goodput = float64(t.bytes) / elapsed
 	}
+	t.profile.CDCAvg = t.cdcPin
 	if !t.cfg.Enabled {
 		return t.profile
 	}
@@ -237,6 +257,7 @@ func (t *Tuner) Observe(s Sample) Profile {
 		if t.profile.Compress == compress.CodecZstd {
 			t.profile.Compress = compress.CodecLZ4
 		}
+		t.profile.CDCAvg = t.cdcPin
 		t.lastTune = time.Now()
 		return t.profile
 	}
@@ -253,12 +274,11 @@ func (t *Tuner) Observe(s Sample) Profile {
 			candidate.Window = candidate.Streams * 4
 		}
 	case 1:
-		if t.cfg.ChunkAvg == 0 {
-			if s.RTTMs < 20 && candidate.FrameSize < 256*1024 {
-				candidate.FrameSize *= 2
-			} else if s.RTTMs > 100 && candidate.FrameSize > 16*1024 {
-				candidate.FrameSize /= 2
-			}
+		// Tune wire frame only; never mutate CDCAvg.
+		if s.RTTMs < 20 && candidate.FrameSize < 256*1024 {
+			candidate.FrameSize *= 2
+		} else if s.RTTMs > 100 && candidate.FrameSize > 16*1024 {
+			candidate.FrameSize /= 2
 		}
 	case 2:
 		if t.cfg.Compress == compress.CodecAuto && s.CompressRatio >= 1.1 && s.CPUPercent < 80 {
@@ -269,13 +289,14 @@ func (t *Tuner) Observe(s Sample) Profile {
 			}
 		}
 	}
-	// Keep candidate if instantaneous goodput looks better; else revert nudge on next poor sample.
+	candidate.CDCAvg = t.cdcPin
 	inst := 0.0
 	if s.Elapsed > 0 {
 		inst = float64(s.BytesVerified) / s.Elapsed.Seconds()
 	}
 	if inst > 0 && t.profile.Goodput > 0 && inst+1024 < t.profile.Goodput*0.92 {
 		t.profile = t.prev
+		t.profile.CDCAvg = t.cdcPin
 		return t.profile
 	}
 	t.prev = t.profile

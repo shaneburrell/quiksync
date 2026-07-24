@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"sync"
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/pierrec/lz4/v4"
 )
+
+const MaxUncompressedChunk = 64 << 20 // 64 MiB hard cap per chunk
 
 type Codec uint8
 
@@ -87,29 +90,66 @@ func Encode(codec Codec, data []byte) (Codec, []byte, error) {
 	return codec, out, nil
 }
 
-// Decode decompresses data.
+var zstdDecPool = sync.Pool{
+	New: func() any {
+		r, err := zstd.NewReader(nil)
+		if err != nil {
+			return nil
+		}
+		return r
+	},
+}
+
+// Decode decompresses data. Output is capped to uncompressedLen when > 0,
+// and never exceeds MaxUncompressedChunk.
 func Decode(codec Codec, data []byte, uncompressedLen int) ([]byte, error) {
 	if codec == CodecNone || codec == CodecAuto {
 		return data, nil
 	}
+	if uncompressedLen < 0 {
+		return nil, fmt.Errorf("negative uncompressed length")
+	}
+	if uncompressedLen > MaxUncompressedChunk {
+		return nil, fmt.Errorf("uncompressed length %d exceeds max %d", uncompressedLen, MaxUncompressedChunk)
+	}
+	maxOut := MaxUncompressedChunk
+	if uncompressedLen > 0 {
+		maxOut = uncompressedLen
+	}
 	switch codec {
 	case CodecLZ4:
 		r := lz4.NewReader(bytes.NewReader(data))
-		var buf bytes.Buffer
-		if uncompressedLen > 0 {
-			buf.Grow(uncompressedLen)
-		}
-		if _, err := io.Copy(&buf, r); err != nil {
-			return nil, err
-		}
-		return buf.Bytes(), nil
-	case CodecZstd:
-		r, err := zstd.NewReader(nil)
+		limited := io.LimitReader(r, int64(maxOut)+1)
+		out, err := io.ReadAll(limited)
 		if err != nil {
 			return nil, err
 		}
-		defer r.Close()
-		return r.DecodeAll(data, make([]byte, 0, uncompressedLen))
+		if len(out) > maxOut {
+			return nil, fmt.Errorf("decompressed size exceeds cap %d", maxOut)
+		}
+		if uncompressedLen > 0 && len(out) != uncompressedLen {
+			return nil, fmt.Errorf("decompressed size %d != expected %d", len(out), uncompressedLen)
+		}
+		return out, nil
+	case CodecZstd:
+		raw := zstdDecPool.Get()
+		if raw == nil {
+			return nil, fmt.Errorf("zstd decoder unavailable")
+		}
+		dec := raw.(*zstd.Decoder)
+		defer zstdDecPool.Put(dec)
+		dst := make([]byte, 0, maxOut)
+		out, err := dec.DecodeAll(data, dst)
+		if err != nil {
+			return nil, err
+		}
+		if len(out) > maxOut {
+			return nil, fmt.Errorf("decompressed size exceeds cap %d", maxOut)
+		}
+		if uncompressedLen > 0 && len(out) != uncompressedLen {
+			return nil, fmt.Errorf("decompressed size %d != expected %d", len(out), uncompressedLen)
+		}
+		return out, nil
 	default:
 		return nil, fmt.Errorf("unknown codec %d", codec)
 	}

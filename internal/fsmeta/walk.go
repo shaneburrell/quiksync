@@ -74,8 +74,10 @@ func Walk(root string, exclude []string) ([]FileInfo, error) {
 }
 
 func matchExclude(rel string, patterns []string) bool {
+	// Normalize separators so Windows-style paths match Unix-style globs.
+	rel = filepath.ToSlash(strings.ReplaceAll(rel, "\\", "/"))
 	for _, p := range patterns {
-		p = filepath.ToSlash(p)
+		p = filepath.ToSlash(strings.ReplaceAll(p, "\\", "/"))
 		if ok, _ := filepath.Match(p, rel); ok {
 			return true
 		}

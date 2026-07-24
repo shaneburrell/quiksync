@@ -60,6 +60,7 @@ func commonTransferFlags(cmd *cobra.Command, opts *TransferFlags) {
 	cmd.Flags().BoolVar(&opts.Auto, "auto", true, "autotune streams, frame size, and compression")
 	cmd.Flags().IntVar(&opts.Streams, "streams", 0, "pin stream/worker count (0=auto)")
 	cmd.Flags().StringVar(&opts.Compress, "compress", "auto", "compression: auto|none|lz4|zstd")
-	cmd.Flags().StringVar(&opts.ChunkSize, "chunk-size", "", "pin CDC average chunk size (e.g. 64K)")
+	cmd.Flags().StringVar(&opts.ChunkSize, "chunk-size", "", "pin CDC average chunk size (e.g. 64K, 1MiB)")
 	cmd.Flags().StringVar(&opts.ProfilePath, "profile", "", "path to load/save host autotune profile")
+	cmd.Flags().BoolVar(&opts.Insecure, "insecure", false, "skip QUIC TOFU certificate pinning (labs only)")
 }

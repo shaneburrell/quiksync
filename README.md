@@ -85,12 +85,14 @@ quiksync sync ./src ssh://user@host:22/data/dst --delete
 
 ### QUIC daemon (tough / WAN links)
 
+The daemon uses a persisted self-signed cert under `~/.config/quiksync/` (or `$QUIKSYNC_CONFIG`). Clients **TOFU-pin** the server fingerprint on first connect; later mismatches fail with a clear error. Use `--insecure` only for labs. The serve `--root` is authoritative — clients cannot escape it via `Hello.Root`.
+
 ```bash
 # On the server
 quiksync serve --listen 0.0.0.0:4242 --root /data
 
 # On the client
-quiksync copy ./src quiksync://server.example:4242/backup/src
+quiksync copy ./src quiksync://server.example:4242/
 ```
 
 ## Autotuning
@@ -121,7 +123,8 @@ quiksync copy ./src ./dst --chunk-size=64K --bwlimit=10485760
 | `--checksum` | false | Always compare by content hash |
 | `--skip-unstable` | false | Skip mutating files instead of retrying |
 | `--exclude` | — | Glob patterns to skip |
-| `--delete` | false | (`sync` only) remove dest extras |
+| `--delete` | false | (`sync` only) remove dest extras; skipped if any file failed |
+| `--insecure` | false | Skip QUIC TOFU pin verification (labs only) |
 
 ## How it works
 
@@ -139,10 +142,10 @@ Source ──► Walk / plan ──► FastCDC + BLAKE3 ──► Delta vs dest 
 
 **Correctness invariants**
 
-1. Destination path is replaced only after whole-file hash verification.
-2. A completed journal entry means the source generation matched at finalize time.
+1. Destination path is replaced only after whole-file hash verification and `fsync` of the temp file.
+2. A completed journal entry means the source generation matched at finalize time; resume still checks the dest exists (and re-copies if missing or `--checksum` disagrees).
 3. Retries never overwrite a good dest with a partial file (temp + rename only).
-4. `--delete` only removes paths absent from the same job’s source listing.
+4. `--delete` runs only on a clean job (`FilesFailed == 0`, walk completed, context not canceled).
 
 ## Project layout
 

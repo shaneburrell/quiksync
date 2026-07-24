@@ -120,11 +120,11 @@ func TestStableWindow(t *testing.T) {
 		Source: src, Dest: dst, StableWindow: time.Hour, SkipUnstable: true, MaxFileAttempts: 1,
 		Tune: autotune.Config{Enabled: false, Compress: compress.CodecNone, Streams: 1},
 	})
-	if err != nil {
-		t.Fatalf("run: %v", err)
+	if err == nil {
+		t.Fatal("expected non-zero exit when unstable files fail")
 	}
-	if stats.FilesCopied != 0 {
-		t.Fatalf("expected no copy for unstable file, got %d", stats.FilesCopied)
+	if stats.FilesCopied != 0 || stats.FilesFailed != 1 {
+		t.Fatalf("expected failed unstable file, got %+v", stats)
 	}
 }
 
