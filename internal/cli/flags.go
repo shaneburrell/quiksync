@@ -19,6 +19,8 @@ type TransferFlags struct {
 	ProfilePath     string
 	Delete          bool
 	Insecure        bool // labs only: skip QUIC TOFU pin verification
+	AuthToken       string
+	JobID           string
 	LogFile         string
 	NoLog           bool
 }

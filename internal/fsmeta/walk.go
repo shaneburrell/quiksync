@@ -73,6 +73,11 @@ func Walk(root string, exclude []string) ([]FileInfo, error) {
 	return out, err
 }
 
+// MatchExclude reports whether rel matches any exclude glob (rsync-like).
+func MatchExclude(rel string, patterns []string) bool {
+	return matchExclude(rel, patterns)
+}
+
 func matchExclude(rel string, patterns []string) bool {
 	// Normalize separators so Windows-style paths match Unix-style globs.
 	rel = filepath.ToSlash(strings.ReplaceAll(rel, "\\", "/"))

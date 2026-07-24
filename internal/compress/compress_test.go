@@ -73,3 +73,15 @@ func TestSampleRatio(t *testing.T) {
 		t.Fatal("empty sample")
 	}
 }
+
+func TestZstdRejectsOversize(t *testing.T) {
+	// Compress a payload larger than the declared uncompressedLen cap.
+	big := bytes.Repeat([]byte("zstd-bomb-"), 200_000) // ~2MB
+	_, enc, err := Encode(CodecZstd, big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Decode(CodecZstd, enc, 1024); err == nil {
+		t.Fatal("expected oversize rejection")
+	}
+}

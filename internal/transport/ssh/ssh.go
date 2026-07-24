@@ -178,7 +178,12 @@ func (r *remoteReader) Read(p []byte) (int, error) {
 		r.eof = true
 		return 0, io.EOF
 	}
+	if typ == protocol.MsgErr {
+		r.eof = true
+		return 0, remoteErr(typ, payload)
+	}
 	if typ != protocol.MsgReadData {
+		r.eof = true
 		return 0, remoteErr(typ, payload)
 	}
 	n := copy(p, payload)

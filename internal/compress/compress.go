@@ -92,7 +92,7 @@ func Encode(codec Codec, data []byte) (Codec, []byte, error) {
 
 var zstdDecPool = sync.Pool{
 	New: func() any {
-		r, err := zstd.NewReader(nil)
+		r, err := zstd.NewReader(nil, zstd.WithDecoderMaxMemory(uint64(MaxUncompressedChunk)))
 		if err != nil {
 			return nil
 		}
@@ -119,18 +119,7 @@ func Decode(codec Codec, data []byte, uncompressedLen int) ([]byte, error) {
 	switch codec {
 	case CodecLZ4:
 		r := lz4.NewReader(bytes.NewReader(data))
-		limited := io.LimitReader(r, int64(maxOut)+1)
-		out, err := io.ReadAll(limited)
-		if err != nil {
-			return nil, err
-		}
-		if len(out) > maxOut {
-			return nil, fmt.Errorf("decompressed size exceeds cap %d", maxOut)
-		}
-		if uncompressedLen > 0 && len(out) != uncompressedLen {
-			return nil, fmt.Errorf("decompressed size %d != expected %d", len(out), uncompressedLen)
-		}
-		return out, nil
+		return readCapped(r, maxOut, uncompressedLen)
 	case CodecZstd:
 		raw := zstdDecPool.Get()
 		if raw == nil {
@@ -138,21 +127,28 @@ func Decode(codec Codec, data []byte, uncompressedLen int) ([]byte, error) {
 		}
 		dec := raw.(*zstd.Decoder)
 		defer zstdDecPool.Put(dec)
-		dst := make([]byte, 0, maxOut)
-		out, err := dec.DecodeAll(data, dst)
-		if err != nil {
+		if err := dec.Reset(bytes.NewReader(data)); err != nil {
 			return nil, err
 		}
-		if len(out) > maxOut {
-			return nil, fmt.Errorf("decompressed size exceeds cap %d", maxOut)
-		}
-		if uncompressedLen > 0 && len(out) != uncompressedLen {
-			return nil, fmt.Errorf("decompressed size %d != expected %d", len(out), uncompressedLen)
-		}
-		return out, nil
+		return readCapped(dec, maxOut, uncompressedLen)
 	default:
 		return nil, fmt.Errorf("unknown codec %d", codec)
 	}
+}
+
+func readCapped(r io.Reader, maxOut, uncompressedLen int) ([]byte, error) {
+	limited := io.LimitReader(r, int64(maxOut)+1)
+	out, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, err
+	}
+	if len(out) > maxOut {
+		return nil, fmt.Errorf("decompressed size exceeds cap %d", maxOut)
+	}
+	if uncompressedLen > 0 && len(out) != uncompressedLen {
+		return nil, fmt.Errorf("decompressed size %d != expected %d", len(out), uncompressedLen)
+	}
+	return out, nil
 }
 
 // SampleRatio returns uncompressed/compressed for a sample (1.0 = no gain).

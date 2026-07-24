@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -23,5 +24,37 @@ func TestSafeJoinRejectsEscape(t *testing.T) {
 	want, _ := filepath.Abs(filepath.Join(root, "b", "c"))
 	if got != want {
 		t.Fatalf("got %s want %s", got, want)
+	}
+}
+
+func TestSafeJoinFileRejectsEmpty(t *testing.T) {
+	root := t.TempDir()
+	for _, rel := range []string{"", ".", "./"} {
+		if _, err := SafeJoinFile(root, rel); err == nil {
+			t.Fatalf("expected rejection for %q", rel)
+		}
+	}
+}
+
+func TestConfineRejectsSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "leak")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	if _, err := Confine(root, "leak/secret.txt"); err == nil {
+		t.Fatal("expected symlink escape rejection")
+	}
+	// In-root file still works.
+	if err := os.WriteFile(filepath.Join(root, "ok.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Confine(root, "ok.txt"); err != nil {
+		t.Fatal(err)
 	}
 }

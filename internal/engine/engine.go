@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -40,7 +41,9 @@ type Config struct {
 	Tune            autotune.Config
 	Verbose         bool
 	Insecure        bool   // skip QUIC TOFU pin verification (labs only)
+	AuthToken       string // QUIC daemon shared secret
 	JobID           string // journal id; default "default"
+	ConfigDir       string // for remote-dest journal/index (QUIKSYNC_CONFIG)
 
 	// LogFile enables tailable job event logging when non-empty.
 	LogFile string
@@ -106,12 +109,12 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 		defer func() { _ = rep.Close() }()
 	}
 
-	src, err := openTransport(ctx, srcEP, cfg.Insecure)
+	src, err := openTransport(ctx, srcEP, cfg.Insecure, cfg.AuthToken)
 	if err != nil {
 		return Stats{}, fmt.Errorf("source: %w", err)
 	}
 	defer func() { _ = src.Close() }()
-	dst, err := openTransport(ctx, dstEP, cfg.Insecure)
+	dst, err := openTransport(ctx, dstEP, cfg.Insecure, cfg.AuthToken)
 	if err != nil {
 		return Stats{}, fmt.Errorf("dest: %w", err)
 	}
@@ -119,12 +122,33 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 
 	var journ *journal.Journal
 	var idx *index.Cache
+	stateRoot := ""
 	if dstEP.Scheme == "file" {
-		journ, err = journal.Open(dst.Root(), cfg.JobID)
+		stateRoot = dst.Root()
+	} else if cfg.Resume {
+		cfgDir := cfg.ConfigDir
+		if cfgDir == "" {
+			cfgDir = os.Getenv("QUIKSYNC_CONFIG")
+		}
+		if cfgDir == "" {
+			if h, err := os.UserConfigDir(); err == nil {
+				cfgDir = filepath.Join(h, "quiksync")
+			} else {
+				cfgDir = "."
+			}
+		}
+		safe, err := journal.SanitizeJobID(cfg.JobID)
 		if err != nil {
 			return Stats{}, err
 		}
-		idx, err = index.Open(dst.Root())
+		stateRoot = filepath.Join(cfgDir, "jobs", safe)
+	}
+	if stateRoot != "" {
+		journ, err = journal.Open(stateRoot, cfg.JobID)
+		if err != nil {
+			return Stats{}, err
+		}
+		idx, err = index.Open(stateRoot)
 		if err != nil {
 			return Stats{}, err
 		}
@@ -172,6 +196,9 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 	if workers < 1 {
 		workers = 1
 	}
+	if workers > 32 {
+		workers = 32
+	}
 	if rep != nil {
 		rep.JobStart(cfg.JobID, cfg.Source, cfg.Dest, mode, workers)
 		rep.Probe(prof.Streams, prof.Compress.String(), prof.FrameSize, prof.CDCAvg)
@@ -188,10 +215,18 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 	var wg sync.WaitGroup
 
 	tickCtx, tickCancel := context.WithCancel(ctx)
-	defer tickCancel()
+	var tickWG sync.WaitGroup
 	if rep != nil && cfg.ProgressInterval > 0 {
-		go progressTicker(tickCtx, rep, &stats, filesTotal, started, cfg.ProgressInterval)
+		tickWG.Add(1)
+		go func() {
+			defer tickWG.Done()
+			progressTicker(tickCtx, rep, &stats, filesTotal, started, cfg.ProgressInterval)
+		}()
 	}
+	defer func() {
+		tickCancel()
+		tickWG.Wait()
+	}()
 
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
@@ -249,11 +284,12 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 	}
 	wg.Wait()
 	tickCancel()
+	tickWG.Wait()
 	_ = tuner.Save()
 
 	if cfg.SyncMode && cfg.Delete && !cfg.DryRun {
 		if ctx.Err() == nil && stats.FilesFailed == 0 && walkOK {
-			deleted, err := deleteExtras(ctx, srcFiles, dst, rep)
+			deleted, err := deleteExtras(ctx, srcFiles, dst, cfg.Exclude, rep)
 			stats.FilesDeleted = deleted
 			if err != nil {
 				if rep != nil {
@@ -405,18 +441,29 @@ func tryTransfer(
 	}
 
 	gen := fsmeta.Generation{Size: meta.Size, ModNano: meta.ModTime.UnixNano()}
+	forceTransfer := false
 	if journ != nil && cfg.Resume {
 		if e, ok := journ.Get(meta.RelPath); ok && e.Status == journal.StatusComplete {
 			if e.SrcSize == gen.Size && e.SrcModNano == gen.ModNano && !cfg.Checksum {
 				if dm, serr := dst.Stat(ctx, meta.RelPath); serr == nil &&
 					dm.Size == e.SrcSize && dm.ModTime.UnixNano() == e.SrcModNano {
-					return 0, 0, 0, 0, "skipped", 0, 0, nil
+					if e.SrcDigest == "" {
+						// Missing digest: do not trust journal skip.
+						forceTransfer = true
+					} else if match, herr := destDigestMatches(ctx, dst, meta.RelPath, e.SrcDigest); herr != nil {
+						return 0, 0, 0, 0, "failed", 0, 0, herr
+					} else if match {
+						return 0, 0, 0, 0, "skipped", 0, 0, nil
+					} else {
+						// Digest mismatch despite matching size/mtime — must re-copy.
+						forceTransfer = true
+					}
 				}
 			}
 		}
 	}
 
-	if !cfg.Checksum {
+	if !cfg.Checksum && !forceTransfer {
 		if dm, err := dst.Stat(ctx, meta.RelPath); err == nil {
 			if dm.Size == meta.Size && dm.ModTime.UnixNano() == meta.ModTime.UnixNano() {
 				return 0, 0, 0, 0, "skipped", 0, 0, nil
@@ -460,7 +507,11 @@ func tryTransfer(
 		}
 	}
 	if len(destSig.Chunks) == 0 {
-		destSig, _ = dst.GetSignature(ctx, meta.RelPath)
+		var sigErr error
+		destSig, sigErr = dst.GetSignature(ctx, meta.RelPath)
+		if sigErr != nil {
+			return 0, 0, 0, 0, "failed", 0, 0, sigErr
+		}
 	}
 
 	if !delta.NeedsTransfer(sig, destSig, cfg.Checksum) && sig.Digest == destSig.Digest {
@@ -507,6 +558,9 @@ func tryTransfer(
 	var chunksSent int64
 	codecPref := prof.Compress
 	for _, c := range sig.Chunks {
+		if err := ctx.Err(); err != nil {
+			return 0, 0, 0, 0, "failed", 0, 0, err
+		}
 		data := c.Data
 		if data == nil {
 			return 0, 0, 0, 0, "failed", 0, 0, fmt.Errorf("missing chunk data")
@@ -558,16 +612,20 @@ func tryTransfer(
 	committed = true
 
 	if idx != nil {
-		_ = idx.Put(meta.RelPath, sig.Size, gen.ModNano, cdcAvg, chunk.FileSignature{
+		if err := idx.Put(meta.RelPath, sig.Size, gen.ModNano, cdcAvg, chunk.FileSignature{
 			Size: sig.Size, Digest: sig.Digest, Chunks: stripData(sig.Chunks),
-		})
+		}); err != nil && cfg.Verbose {
+			fmt.Fprintf(os.Stderr, "warn index put %s: %v\n", meta.RelPath, err)
+		}
 	}
 	if journ != nil {
-		_ = journ.Put(journal.Entry{
+		if err := journ.Put(journal.Entry{
 			JobID: cfg.JobID, RelPath: meta.RelPath, Status: journal.StatusComplete,
 			SrcDigest: sig.Digest.String(), SrcSize: gen.Size, SrcModNano: gen.ModNano,
 			ChunksDone: len(sig.Chunks),
-		})
+		}); err != nil && cfg.Verbose {
+			fmt.Fprintf(os.Stderr, "warn journal put %s: %v\n", meta.RelPath, err)
+		}
 	}
 	compRatio := 1.0
 	if wireBytes > 0 {
@@ -584,7 +642,7 @@ func stripData(in []chunk.Chunk) []chunk.Chunk {
 	return out
 }
 
-func deleteExtras(ctx context.Context, srcFiles []transport.FileMeta, dst transport.Transport, rep *progress.Reporter) (int64, error) {
+func deleteExtras(ctx context.Context, srcFiles []transport.FileMeta, dst transport.Transport, exclude []string, rep *progress.Reporter) (int64, error) {
 	keep := map[string]struct{}{}
 	for _, f := range srcFiles {
 		keep[f.RelPath] = struct{}{}
@@ -595,7 +653,14 @@ func deleteExtras(ctx context.Context, srcFiles []transport.FileMeta, dst transp
 	}
 	var n int64
 	for _, f := range dstFiles {
+		if err := ctx.Err(); err != nil {
+			return n, err
+		}
 		if _, ok := keep[f.RelPath]; ok {
+			continue
+		}
+		// rsync-like: excluded paths are protected from --delete
+		if fsmeta.MatchExclude(f.RelPath, exclude) {
 			continue
 		}
 		if err := dst.Remove(ctx, f.RelPath); err != nil {
@@ -609,14 +674,30 @@ func deleteExtras(ctx context.Context, srcFiles []transport.FileMeta, dst transp
 	return n, nil
 }
 
-func openTransport(ctx context.Context, ep transport.Endpoint, insecure bool) (transport.Transport, error) {
+func destDigestMatches(ctx context.Context, dst transport.Transport, rel, want string) (bool, error) {
+	rc, err := dst.OpenRead(ctx, rel)
+	if err != nil {
+		return false, err
+	}
+	got, _, err := chunk.HashFile(rc)
+	cerr := rc.Close()
+	if err != nil {
+		return false, err
+	}
+	if cerr != nil {
+		return false, cerr
+	}
+	return got.String() == want, nil
+}
+
+func openTransport(ctx context.Context, ep transport.Endpoint, insecure bool, authToken string) (transport.Transport, error) {
 	switch ep.Scheme {
 	case "file":
 		return local.New(ep.Path)
 	case "ssh":
 		return sshxfer.New(ctx, ep)
 	case "quiksync":
-		return daemon.DialOpts(ctx, ep, daemon.DialOptions{Insecure: insecure})
+		return daemon.DialOpts(ctx, ep, daemon.DialOptions{Insecure: insecure, AuthToken: authToken})
 	case "s3":
 		return nil, fmt.Errorf("s3 transport reserved for a later release")
 	default:
@@ -641,12 +722,12 @@ func Verify(ctx context.Context, source, dest string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	src, err := openTransport(ctx, srcEP, false)
+	src, err := openTransport(ctx, srcEP, false, "")
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = src.Close() }()
-	dst, err := openTransport(ctx, dstEP, false)
+	dst, err := openTransport(ctx, dstEP, false, "")
 	if err != nil {
 		return nil, err
 	}

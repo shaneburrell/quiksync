@@ -38,17 +38,23 @@ func TestQUICEngineCopy(t *testing.T) {
 	addr := ln.Addr().String()
 	_ = ln.Close()
 	errCh := make(chan error, 1)
+	const token = "e2e-test-token"
+	cfgDir := t.TempDir()
 	go func() {
-		errCh <- daemon.Serve(ctx, daemon.ServeConfig{Listen: addr, Root: root})
+		errCh <- daemon.Serve(ctx, daemon.ServeConfig{Listen: addr, Root: root, AuthToken: token})
 	}()
 	time.Sleep(250 * time.Millisecond)
 
 	destURL := url.URL{Scheme: "quiksync", Host: addr, Path: "/"}
 	dest := destURL.String()
 	stats, err := engine.Run(context.Background(), engine.Config{
-		Source: src,
-		Dest:   dest,
-		Tune:   autotune.Config{Enabled: false, Compress: compress.CodecLZ4, Streams: 2},
+		Source:    src,
+		Dest:      dest,
+		AuthToken: token,
+		ConfigDir: cfgDir,
+		Resume:    true,
+		JobID:     "default",
+		Tune:      autotune.Config{Enabled: false, Compress: compress.CodecLZ4, Streams: 2},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -63,6 +69,9 @@ func TestQUICEngineCopy(t *testing.T) {
 	}
 	if len(mismatches) != 0 {
 		t.Fatalf("mismatches: %v", mismatches)
+	}
+	if _, err := os.Stat(filepath.Join(cfgDir, "jobs", "default", ".quiksync", "journal", "default.jsonl")); err != nil {
+		t.Fatalf("expected remote journal under config dir: %v", err)
 	}
 	cancel()
 }

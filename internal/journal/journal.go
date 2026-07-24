@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -40,12 +42,39 @@ type Journal struct {
 	by   map[string]Entry
 }
 
+// SanitizeJobID returns a filesystem-safe job id (no path separators / "..").
+func SanitizeJobID(jobID string) (string, error) {
+	if jobID == "" {
+		jobID = "default"
+	}
+	if strings.Contains(jobID, "..") || strings.ContainsAny(jobID, `/\`) {
+		return "", fmt.Errorf("invalid job id %q", jobID)
+	}
+	b := make([]byte, 0, len(jobID))
+	for i := 0; i < len(jobID); i++ {
+		c := jobID[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' {
+			b = append(b, c)
+		} else {
+			b = append(b, '_')
+		}
+	}
+	if len(b) == 0 {
+		return "", fmt.Errorf("invalid job id %q", jobID)
+	}
+	return string(b), nil
+}
+
 func Open(destRoot, jobID string) (*Journal, error) {
+	safe, err := SanitizeJobID(jobID)
+	if err != nil {
+		return nil, err
+	}
 	dir := filepath.Join(destRoot, ".quiksync", "journal")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	path := filepath.Join(dir, jobID+".jsonl")
+	path := filepath.Join(dir, safe+".jsonl")
 	j := &Journal{path: path, by: map[string]Entry{}}
 	if err := j.load(); err != nil {
 		return nil, err

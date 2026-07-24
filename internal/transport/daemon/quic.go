@@ -18,8 +18,13 @@ import (
 	"github.com/shaneburrell/quiksync/internal/transport/local"
 )
 
+const maxConcurrentStreams = 64
+
 // Serve starts a QUIC listener and serves remote-helper sessions.
 func Serve(ctx context.Context, cfg ServeConfig) error {
+	if cfg.AuthToken == "" && !cfg.AllowNoAuth {
+		return fmt.Errorf("serve requires --auth-token (or QUIKSYNC_AUTH_TOKEN), or --allow-no-auth for labs")
+	}
 	tlsConf, err := loadOrCreatePinnedTLS(cfg.CertFile, cfg.KeyFile)
 	if err != nil {
 		return err
@@ -40,32 +45,49 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 		if err != nil {
 			return err
 		}
-		go handleConn(ctx, conn, cfg.Root)
+		go handleConn(ctx, conn, cfg)
 	}
 }
 
-func handleConn(ctx context.Context, conn *quic.Conn, defaultRoot string) {
+func handleConn(ctx context.Context, conn *quic.Conn, cfg ServeConfig) {
 	defer func() { _ = conn.CloseWithError(0, "bye") }()
+	sem := make(chan struct{}, maxConcurrentStreams)
+	var wg sync.WaitGroup
 	for {
 		stream, err := conn.AcceptStream(ctx)
 		if err != nil {
+			wg.Wait()
 			return
 		}
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			_ = stream.Close()
+			wg.Wait()
+			return
+		}
+		wg.Add(1)
 		go func(s *quic.Stream) {
 			defer func() {
 				if r := recover(); r != nil {
 					fmt.Fprintf(os.Stderr, "quiksync serve: stream panic: %v\n", r)
 				}
 				_ = s.Close()
+				<-sem
+				wg.Done()
 			}()
-			_ = RunRemoteHelperRoot(ctx, s, s, defaultRoot)
+			_ = RunRemoteHelperOpts(ctx, s, s, HelperOptions{
+				DefaultRoot: cfg.Root,
+				AuthToken:   cfg.AuthToken,
+			})
 		}(stream)
 	}
 }
 
 // DialOptions configures QUIC client dialing.
 type DialOptions struct {
-	Insecure bool // skip TOFU pin verification (labs only)
+	Insecure  bool   // skip TOFU pin verification (labs only)
+	AuthToken string // shared secret matching serve --auth-token
 }
 
 // Dial connects to a quiksync:// endpoint over QUIC with TOFU pinning.
@@ -94,8 +116,10 @@ func DialOpts(ctx context.Context, ep transport.Endpoint, opts DialOptions) (*Cl
 		return nil, err
 	}
 	c := &Client{ep: ep, conn: conn, stream: stream}
-	// Server --root is authoritative; send empty Root.
-	if err := protocol.WriteJSON(c.stream, protocol.MsgHello, protocol.Hello{Version: "1", Root: ""}); err != nil {
+	// Server --root is authoritative; send empty Root + auth token.
+	if err := protocol.WriteJSON(c.stream, protocol.MsgHello, protocol.Hello{
+		Version: "1", Root: "", AuthToken: opts.AuthToken,
+	}); err != nil {
 		_ = c.Close()
 		return nil, err
 	}
@@ -104,11 +128,14 @@ func DialOpts(ctx context.Context, ep transport.Endpoint, opts DialOptions) (*Cl
 		_ = c.Close()
 		return nil, err
 	}
+	if typ == protocol.MsgErr {
+		_ = c.Close()
+		return nil, remoteErr(typ, payload)
+	}
 	if typ != protocol.MsgHelloOK {
 		_ = c.Close()
 		return nil, fmt.Errorf("quic hello failed: type=%d", typ)
 	}
-	_ = payload
 	return c, nil
 }
 

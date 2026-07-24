@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/subtle"
 	"fmt"
 	"io"
 	"os"
@@ -12,14 +13,26 @@ import (
 	"github.com/shaneburrell/quiksync/internal/transport/local"
 )
 
+// HelperOptions configures the remote helper session.
+type HelperOptions struct {
+	DefaultRoot string
+	// AuthToken, when non-empty, must match Hello.AuthToken (constant-time).
+	AuthToken string
+}
+
 // RunRemoteHelper serves the framed protocol over r/w against a local root.
-// Root is taken from Hello message, falling back to defaultRoot / QUIKSYNC_ROOT / ".".
+// Root is taken from Hello message, falling back to QUIKSYNC_ROOT / ".".
 func RunRemoteHelper(ctx context.Context, r io.Reader, w io.Writer) error {
-	return RunRemoteHelperRoot(ctx, r, w, "")
+	return RunRemoteHelperOpts(ctx, r, w, HelperOptions{})
 }
 
 // RunRemoteHelperRoot is like RunRemoteHelper with an explicit default root.
 func RunRemoteHelperRoot(ctx context.Context, r io.Reader, w io.Writer, defaultRoot string) error {
+	return RunRemoteHelperOpts(ctx, r, w, HelperOptions{DefaultRoot: defaultRoot})
+}
+
+// RunRemoteHelperOpts serves the framed protocol with options.
+func RunRemoteHelperOpts(ctx context.Context, r io.Reader, w io.Writer, opts HelperOptions) error {
 	typ, payload, err := protocol.ReadMsg(r)
 	if err != nil {
 		return err
@@ -31,9 +44,15 @@ func RunRemoteHelperRoot(ctx context.Context, r io.Reader, w io.Writer, defaultR
 	if err := protocol.DecodeJSON(payload, &hello); err != nil {
 		return err
 	}
+	if opts.AuthToken != "" {
+		if subtle.ConstantTimeCompare([]byte(hello.AuthToken), []byte(opts.AuthToken)) != 1 {
+			_ = writeErr(w, fmt.Errorf("authentication failed"))
+			return fmt.Errorf("authentication failed")
+		}
+	}
 	// Daemon (--root / defaultRoot): always use server root; ignore client absolute Root.
 	// SSH remote-helper (no defaultRoot): use Hello.Root from client.
-	root := defaultRoot
+	root := opts.DefaultRoot
 	if root == "" {
 		root = hello.Root
 	}
@@ -71,7 +90,10 @@ func RunRemoteHelperRoot(ctx context.Context, r io.Reader, w io.Writer, defaultR
 			return nil
 		case protocol.MsgWalk:
 			var req protocol.WalkReq
-			_ = protocol.DecodeJSON(payload, &req)
+			if err := protocol.DecodeJSON(payload, &req); err != nil {
+				_ = writeErr(w, err)
+				continue
+			}
 			files, err := lt.Walk(ctx, req.Exclude)
 			if err != nil {
 				_ = writeErr(w, err)
@@ -86,7 +108,10 @@ func RunRemoteHelperRoot(ctx context.Context, r io.Reader, w io.Writer, defaultR
 			_ = protocol.WriteJSON(w, protocol.MsgWalkOK, out)
 		case protocol.MsgStat:
 			var req protocol.PathReq
-			_ = protocol.DecodeJSON(payload, &req)
+			if err := protocol.DecodeJSON(payload, &req); err != nil {
+				_ = writeErr(w, err)
+				continue
+			}
 			f, err := lt.Stat(ctx, req.Rel)
 			if err != nil {
 				_ = writeErr(w, err)
@@ -97,7 +122,10 @@ func RunRemoteHelperRoot(ctx context.Context, r io.Reader, w io.Writer, defaultR
 			})
 		case protocol.MsgOpenRead:
 			var req protocol.PathReq
-			_ = protocol.DecodeJSON(payload, &req)
+			if err := protocol.DecodeJSON(payload, &req); err != nil {
+				_ = writeErr(w, err)
+				continue
+			}
 			rc, err := lt.OpenRead(ctx, req.Rel)
 			if err != nil {
 				_ = writeErr(w, err)
@@ -129,7 +157,10 @@ func RunRemoteHelperRoot(ctx context.Context, r io.Reader, w io.Writer, defaultR
 			_ = protocol.WriteJSON(w, protocol.MsgOK, protocol.OK{OK: true})
 		case protocol.MsgBeginWrite:
 			var req protocol.BeginWriteReq
-			_ = protocol.DecodeJSON(payload, &req)
+			if err := protocol.DecodeJSON(payload, &req); err != nil {
+				_ = writeErr(w, err)
+				continue
+			}
 			if session != nil {
 				_ = session.Abort()
 				session = nil
@@ -147,7 +178,10 @@ func RunRemoteHelperRoot(ctx context.Context, r io.Reader, w io.Writer, defaultR
 				continue
 			}
 			var req protocol.WriteChunkReq
-			_ = protocol.DecodeJSON(payload, &req)
+			if err := protocol.DecodeJSON(payload, &req); err != nil {
+				_ = writeErr(w, err)
+				continue
+			}
 			if err := session.WriteChunk(ctx, req.Offset, req.Codec, req.UncompressedLen, req.Data); err != nil {
 				_ = session.Abort()
 				session = nil
@@ -161,10 +195,14 @@ func RunRemoteHelperRoot(ctx context.Context, r io.Reader, w io.Writer, defaultR
 				continue
 			}
 			var req protocol.CommitReq
-			_ = protocol.DecodeJSON(payload, &req)
-			if err := session.Commit(ctx, req.Digest, os.FileMode(req.Mode), time.Unix(0, req.ModNano)); err != nil {
+			if err := protocol.DecodeJSON(payload, &req); err != nil {
 				_ = writeErr(w, err)
+				continue
+			}
+			if err := session.Commit(ctx, req.Digest, os.FileMode(req.Mode), time.Unix(0, req.ModNano)); err != nil {
+				_ = session.Abort()
 				session = nil
+				_ = writeErr(w, err)
 				continue
 			}
 			session = nil
@@ -177,7 +215,10 @@ func RunRemoteHelperRoot(ctx context.Context, r io.Reader, w io.Writer, defaultR
 			_ = protocol.WriteJSON(w, protocol.MsgOK, protocol.OK{OK: true})
 		case protocol.MsgGetSig:
 			var req protocol.PathReq
-			_ = protocol.DecodeJSON(payload, &req)
+			if err := protocol.DecodeJSON(payload, &req); err != nil {
+				_ = writeErr(w, err)
+				continue
+			}
 			sig, err := lt.GetSignature(ctx, req.Rel)
 			if err != nil {
 				_ = writeErr(w, err)
@@ -186,7 +227,10 @@ func RunRemoteHelperRoot(ctx context.Context, r io.Reader, w io.Writer, defaultR
 			_ = protocol.WriteJSON(w, protocol.MsgSigOK, protocol.SigOK{Size: sig.Size, Digest: sig.Digest, Chunks: sig.Chunks})
 		case protocol.MsgRemove:
 			var req protocol.PathReq
-			_ = protocol.DecodeJSON(payload, &req)
+			if err := protocol.DecodeJSON(payload, &req); err != nil {
+				_ = writeErr(w, err)
+				continue
+			}
 			if err := lt.Remove(ctx, req.Rel); err != nil {
 				_ = writeErr(w, err)
 				continue
@@ -194,7 +238,10 @@ func RunRemoteHelperRoot(ctx context.Context, r io.Reader, w io.Writer, defaultR
 			_ = protocol.WriteJSON(w, protocol.MsgOK, protocol.OK{OK: true})
 		case protocol.MsgMkdir:
 			var req protocol.PathReq
-			_ = protocol.DecodeJSON(payload, &req)
+			if err := protocol.DecodeJSON(payload, &req); err != nil {
+				_ = writeErr(w, err)
+				continue
+			}
 			if err := lt.MkdirAll(ctx, req.Rel); err != nil {
 				_ = writeErr(w, err)
 				continue
@@ -216,8 +263,10 @@ func writeErr(w io.Writer, err error) error {
 
 // ServeConfig configures the QUIC daemon.
 type ServeConfig struct {
-	Listen   string
-	CertFile string
-	KeyFile  string
-	Root     string
+	Listen      string
+	CertFile    string
+	KeyFile     string
+	Root        string
+	AuthToken   string
+	AllowNoAuth bool // labs only: permit empty AuthToken
 }

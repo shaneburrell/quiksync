@@ -50,6 +50,19 @@ func buildConfig(src, dest string, f TransferFlags, syncMode bool) (engine.Confi
 		chunkAvg = uint32(n)
 	}
 
+	streams := f.Streams
+	if streams > 32 {
+		streams = 32
+	}
+	authToken := f.AuthToken
+	if authToken == "" {
+		authToken = os.Getenv("QUIKSYNC_AUTH_TOKEN")
+	}
+	jobID := f.JobID
+	if jobID == "" {
+		jobID = "default"
+	}
+	cfgDir, _ := quiksyncConfigDir()
 	cfg := engine.Config{
 		Source:          src,
 		Dest:            dest,
@@ -64,10 +77,12 @@ func buildConfig(src, dest string, f TransferFlags, syncMode bool) (engine.Confi
 		SkipUnstable:    f.SkipUnstable,
 		MaxFileAttempts: f.MaxFileAttempts,
 		Insecure:        f.Insecure,
-		JobID:           "default",
+		AuthToken:       authToken,
+		JobID:           jobID,
+		ConfigDir:       cfgDir,
 		Tune: autotune.Config{
 			Enabled:     f.Auto,
-			Streams:     f.Streams,
+			Streams:     streams,
 			Compress:    codec,
 			ChunkAvg:    chunkAvg,
 			ProfilePath: f.ProfilePath,

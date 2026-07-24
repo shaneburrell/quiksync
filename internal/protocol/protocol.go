@@ -89,8 +89,9 @@ func DecodeJSON(payload []byte, v any) error {
 }
 
 type Hello struct {
-	Version string `json:"version"`
-	Root    string `json:"root,omitempty"`
+	Version   string `json:"version"`
+	Root      string `json:"root,omitempty"`
+	AuthToken string `json:"auth_token,omitempty"`
 }
 
 type FileMeta struct {

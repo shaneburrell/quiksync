@@ -20,13 +20,14 @@ func TestQUICRoundTrip(t *testing.T) {
 
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	defer cancel2()
+	const token = "quic-roundtrip-token"
 	go func() {
-		_ = Serve(ctx2, ServeConfig{Listen: "127.0.0.1:42429", Root: root})
+		_ = Serve(ctx2, ServeConfig{Listen: "127.0.0.1:42429", Root: root, AuthToken: token})
 	}()
 	time.Sleep(250 * time.Millisecond)
 
 	ep := transport.Endpoint{Scheme: "quiksync", Host: "127.0.0.1", Port: "42429", Path: root}
-	client, err := Dial(ctx2, ep)
+	client, err := DialOpts(ctx2, ep, DialOptions{AuthToken: token})
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}

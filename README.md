@@ -22,7 +22,7 @@ quiksync copy ./data quiksync://nas:4242/volume/data
 | Interrupted multi-GB jobs | JSONL journal resume under `.quiksync/` |
 | Files changing while copying | Detect mutation, requeue (or `--skip-unstable`) |
 | Slow / high-RTT / lossy links | Autotune streams, window, compression |
-| Re-copying almost-identical trees | FastCDC deltas — only changed chunks move |
+| Re-copying almost-identical trees | FastCDC deltas plan missing chunks (reused chunks still written locally today) |
 | Mixed environments | Local, SSH, and QUIC daemon transports |
 
 ## Install
@@ -107,15 +107,20 @@ quiksync sync ./src ssh://user@host:22/data/dst --delete
 
 ### QUIC daemon (tough / WAN links)
 
-The daemon uses a persisted self-signed cert under `~/.config/quiksync/` (or `$QUIKSYNC_CONFIG`). Clients **TOFU-pin** the server fingerprint on first connect; later mismatches fail with a clear error. Use `--insecure` only for labs. The serve `--root` is authoritative — clients cannot escape it via `Hello.Root`.
+The daemon uses a persisted self-signed cert under `~/.config/quiksync/` (or `$QUIKSYNC_CONFIG`). Clients **TOFU-pin** the server fingerprint on first connect; later mismatches fail with a clear error. Use `--insecure` only for labs.
+
+Serve defaults to **loopback** (`127.0.0.1:4242`) and requires a shared **`--auth-token`** (or `QUIKSYNC_AUTH_TOKEN`). Non-loopback binds always require a token. The serve `--root` is authoritative — clients cannot escape it via `Hello.Root`, including symlink escapes. Path confinement rejects empty/`..` paths.
 
 ```bash
-# On the server
-quiksync serve --listen 0.0.0.0:4242 --root /data
+# On the server (labs: add --allow-no-auth only on trusted networks)
+export QUIKSYNC_AUTH_TOKEN=change-me
+quiksync serve --listen 127.0.0.1:4242 --root /data --auth-token "$QUIKSYNC_AUTH_TOKEN"
 
-# On the client
-quiksync copy ./src quiksync://server.example:4242/
+# On the client (same token)
+quiksync copy ./src quiksync://server.example:4242/ --auth-token "$QUIKSYNC_AUTH_TOKEN"
 ```
+
+Remote destinations store resume journal/index under `$QUIKSYNC_CONFIG/jobs/<job-id>/` (default job id `default`; override with `--job-id`). `--exclude` patterns also protect matching destination paths from `--delete`.
 
 ## Autotuning
 

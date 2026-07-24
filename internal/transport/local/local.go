@@ -2,6 +2,8 @@ package local
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -38,7 +40,7 @@ func (t *Transport) Close() error { return nil }
 func (t *Transport) Root() string { return t.root }
 
 func (t *Transport) abs(rel string) (string, error) {
-	return transport.SafeJoin(t.root, rel)
+	return transport.Confine(t.root, rel)
 }
 
 func (t *Transport) Walk(ctx context.Context, exclude []string) ([]transport.FileMeta, error) {
@@ -127,6 +129,11 @@ type writeSession struct {
 	committed bool
 }
 
+func partialTempName(rel string) string {
+	sum := sha256.Sum256([]byte(filepath.ToSlash(rel)))
+	return hex.EncodeToString(sum[:8]) + ".partial"
+}
+
 func (t *Transport) BeginWrite(ctx context.Context, rel string, size int64) (transport.WriteSession, error) {
 	dest, err := t.abs(rel)
 	if err != nil {
@@ -142,8 +149,7 @@ func (t *Transport) BeginWrite(ctx context.Context, rel string, size int64) (tra
 	tmpRel := filepath.ToSlash(rel) + ".partial"
 	tmp, err := transport.SafeJoin(tmpDir, tmpRel)
 	if err != nil {
-		// Fall back to hashed name under tmpDir if nested rel is awkward.
-		tmp = filepath.Join(tmpDir, filepath.Base(filepath.FromSlash(rel))+".partial")
+		tmp = filepath.Join(tmpDir, partialTempName(rel))
 	}
 	if err := os.MkdirAll(filepath.Dir(tmp), 0o755); err != nil {
 		return nil, err

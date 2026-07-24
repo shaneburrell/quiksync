@@ -105,6 +105,9 @@ func (r *Reporter) Event(event string, fields ...Field) {
 	line := formatLine(time.Now().UTC(), event, fields...)
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.f == nil {
+		return
+	}
 	_, _ = io.WriteString(r.f, line)
 	_ = r.f.Sync() // durable enough for tail -f / AI watchers
 	if r.latest != nil {

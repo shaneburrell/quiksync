@@ -20,7 +20,7 @@ func TestTOFUPinMismatch(t *testing.T) {
 	errCh := make(chan error, 2)
 	const addr1 = "127.0.0.1:42441"
 	go func() {
-		errCh <- daemon.Serve(ctx1, daemon.ServeConfig{Listen: addr1, Root: root})
+		errCh <- daemon.Serve(ctx1, daemon.ServeConfig{Listen: addr1, Root: root, AllowNoAuth: true})
 	}()
 	time.Sleep(300 * time.Millisecond)
 
@@ -50,7 +50,7 @@ func TestTOFUPinMismatch(t *testing.T) {
 	defer cancel2()
 	const addr2 = "127.0.0.1:42442"
 	go func() {
-		errCh <- daemon.Serve(ctx2, daemon.ServeConfig{Listen: addr2, Root: root})
+		errCh <- daemon.Serve(ctx2, daemon.ServeConfig{Listen: addr2, Root: root, AllowNoAuth: true})
 	}()
 	time.Sleep(300 * time.Millisecond)
 
