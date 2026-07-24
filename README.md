@@ -27,6 +27,14 @@ quiksync copy ./data quiksync://nas:4242/volume/data
 
 ## Install
 
+### Homebrew
+
+```bash
+brew install shaneburrell/tap/quiksync
+```
+
+The formula is maintained in [`shaneburrell/homebrew-tap`](https://github.com/shaneburrell/homebrew-tap) and tracks GitHub Releases.
+
 ### Prebuilt binaries
 
 Download from [Releases](https://github.com/shaneburrell/quiksync/releases) for:
