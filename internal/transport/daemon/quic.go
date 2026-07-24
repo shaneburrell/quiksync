@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -104,6 +105,7 @@ type Client struct {
 	ep     transport.Endpoint
 	conn   *quic.Conn
 	stream *quic.Stream
+	mu     sync.Mutex // serializes framed RPC on the shared stream
 }
 
 func (c *Client) Caps() transport.Caps {
@@ -111,6 +113,8 @@ func (c *Client) Caps() transport.Caps {
 }
 
 func (c *Client) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	_ = protocol.WriteMsg(c.stream, protocol.MsgBye, nil)
 	_ = c.stream.Close()
 	return c.conn.CloseWithError(0, "bye")
@@ -119,6 +123,8 @@ func (c *Client) Close() error {
 func (c *Client) Root() string { return c.ep.Path }
 
 func (c *Client) Walk(ctx context.Context, exclude []string) ([]transport.FileMeta, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if err := protocol.WriteJSON(c.stream, protocol.MsgWalk, protocol.WalkReq{Exclude: exclude}); err != nil {
 		return nil, err
 	}
@@ -143,6 +149,8 @@ func (c *Client) Walk(ctx context.Context, exclude []string) ([]transport.FileMe
 }
 
 func (c *Client) Stat(ctx context.Context, rel string) (transport.FileMeta, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if err := protocol.WriteJSON(c.stream, protocol.MsgStat, protocol.PathReq{Rel: rel}); err != nil {
 		return transport.FileMeta{}, err
 	}
@@ -161,10 +169,63 @@ func (c *Client) Stat(ctx context.Context, rel string) (transport.FileMeta, erro
 }
 
 func (c *Client) OpenRead(ctx context.Context, rel string) (io.ReadCloser, error) {
+	c.mu.Lock()
 	if err := protocol.WriteJSON(c.stream, protocol.MsgOpenRead, protocol.PathReq{Rel: rel}); err != nil {
+		c.mu.Unlock()
 		return nil, err
 	}
-	return &streamReader{r: c.stream}, nil
+	// Hold lock until reader drained via lockedReader.
+	return &lockedStreamReader{c: c}, nil
+}
+
+type lockedStreamReader struct {
+	c    *Client
+	left []byte
+	eof  bool
+}
+
+func (r *lockedStreamReader) Read(p []byte) (int, error) {
+	if len(r.left) > 0 {
+		n := copy(p, r.left)
+		r.left = r.left[n:]
+		return n, nil
+	}
+	if r.eof {
+		return 0, io.EOF
+	}
+	typ, payload, err := protocol.ReadMsg(r.c.stream)
+	if err != nil {
+		return 0, err
+	}
+	if typ == protocol.MsgOK {
+		r.eof = true
+		return 0, io.EOF
+	}
+	if typ != protocol.MsgReadData {
+		return 0, fmt.Errorf("unexpected %d", typ)
+	}
+	n := copy(p, payload)
+	if n < len(payload) {
+		r.left = payload[n:]
+	}
+	return n, nil
+}
+
+func (r *lockedStreamReader) Close() error {
+	// Drain to MsgOK if needed, then unlock.
+	for !r.eof {
+		buf := make([]byte, 64*1024)
+		_, err := r.Read(buf)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			r.c.mu.Unlock()
+			return err
+		}
+	}
+	r.c.mu.Unlock()
+	return nil
 }
 
 type streamReader struct {
@@ -203,6 +264,8 @@ func (r *streamReader) Read(p []byte) (int, error) {
 func (r *streamReader) Close() error { return nil }
 
 func (c *Client) Remove(ctx context.Context, rel string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if err := protocol.WriteJSON(c.stream, protocol.MsgRemove, protocol.PathReq{Rel: rel}); err != nil {
 		return err
 	}
@@ -210,6 +273,8 @@ func (c *Client) Remove(ctx context.Context, rel string) error {
 }
 
 func (c *Client) MkdirAll(ctx context.Context, rel string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if err := protocol.WriteJSON(c.stream, protocol.MsgMkdir, protocol.PathReq{Rel: rel}); err != nil {
 		return err
 	}
@@ -217,6 +282,8 @@ func (c *Client) MkdirAll(ctx context.Context, rel string) error {
 }
 
 func (c *Client) GetSignature(ctx context.Context, rel string) (chunk.FileSignature, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if err := protocol.WriteJSON(c.stream, protocol.MsgGetSig, protocol.PathReq{Rel: rel}); err != nil {
 		return chunk.FileSignature{}, err
 	}
@@ -237,10 +304,13 @@ func (c *Client) GetSignature(ctx context.Context, rel string) (chunk.FileSignat
 type clientWrite struct{ c *Client }
 
 func (c *Client) BeginWrite(ctx context.Context, rel string, size int64) (transport.WriteSession, error) {
+	c.mu.Lock()
 	if err := protocol.WriteJSON(c.stream, protocol.MsgBeginWrite, protocol.BeginWriteReq{Rel: rel, Size: size}); err != nil {
+		c.mu.Unlock()
 		return nil, err
 	}
 	if err := expectOK(c.stream); err != nil {
+		c.mu.Unlock()
 		return nil, err
 	}
 	return &clientWrite{c: c}, nil
@@ -256,6 +326,7 @@ func (w *clientWrite) WriteChunk(ctx context.Context, offset uint64, codec compr
 }
 
 func (w *clientWrite) Commit(ctx context.Context, expected chunk.Digest, mode os.FileMode, modTime time.Time) error {
+	defer w.c.mu.Unlock()
 	if err := protocol.WriteJSON(w.c.stream, protocol.MsgCommit, protocol.CommitReq{
 		Digest: expected, Mode: uint32(mode), ModNano: modTime.UnixNano(),
 	}); err != nil {
@@ -265,6 +336,7 @@ func (w *clientWrite) Commit(ctx context.Context, expected chunk.Digest, mode os
 }
 
 func (w *clientWrite) Abort() error {
+	defer w.c.mu.Unlock()
 	_ = protocol.WriteMsg(w.c.stream, protocol.MsgAbort, nil)
 	return expectOK(w.c.stream)
 }

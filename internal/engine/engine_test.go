@@ -148,7 +148,7 @@ func TestCompressRoundTrip(t *testing.T) {
 	}
 }
 
-func writeFile(t *testing.T, path string, data []byte) {
+func writeFile(t testing.TB, path string, data []byte) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)

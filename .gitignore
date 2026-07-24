@@ -7,5 +7,10 @@
 .quiksync/
 .quiksync.tmp/
 testdata/local/
+testdata/artifacts/
+testdata/soak/
+*.bench
 coverage.out
+coverage.html
+perf/
 **/testdata/fuzz/

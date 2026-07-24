@@ -16,6 +16,7 @@ import (
 	"github.com/shaneburrell/quiksync/internal/fsmeta"
 	"github.com/shaneburrell/quiksync/internal/index"
 	"github.com/shaneburrell/quiksync/internal/journal"
+	"github.com/shaneburrell/quiksync/internal/transfer"
 	"github.com/shaneburrell/quiksync/internal/transport"
 	"github.com/shaneburrell/quiksync/internal/transport/daemon"
 	"github.com/shaneburrell/quiksync/internal/transport/local"
@@ -37,6 +38,10 @@ type Config struct {
 	MaxFileAttempts int
 	Tune            autotune.Config
 	Verbose         bool
+
+	// Test hooks (nil in production).
+	TestAfterFile    func(rel, status string)
+	TestBeforeCommit func(rel string)
 }
 
 type Stats struct {
@@ -44,7 +49,16 @@ type Stats struct {
 	FilesSkipped int64
 	FilesFailed  int64
 	FilesDeleted int64
-	BytesCopied  int64
+	BytesCopied  int64 // uncompressed payload written for missing chunks
+	BytesPayload int64 // same as BytesCopied; wire-oriented accounting
+	ChunksReused int64
+	ChunksSent   int64
+}
+
+type fileResult struct {
+	copied, skipped, failed int64
+	bytes, reused, sent     int64
+	err                     error
 }
 
 func Run(ctx context.Context, cfg Config) (Stats, error) {
@@ -92,14 +106,17 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 	if hostKey == "" {
 		hostKey = "local"
 	}
+	if cfg.Tune.ProfilePath == "" && dstEP.Scheme == "file" {
+		cfg.Tune.ProfilePath = dst.Root() + "/.quiksync/profiles/" + hostKey + ".json"
+	}
 	tuner := autotune.New(cfg.Tune, hostKey)
+	limiter := transfer.NewLimiter(cfg.BandwidthLimit)
 
 	srcFiles, err := src.Walk(ctx, cfg.Exclude)
 	if err != nil {
 		return Stats{}, err
 	}
 
-	// Probe with first readable sample.
 	sample := make([]byte, 0, 64*1024)
 	for _, f := range srcFiles {
 		if f.Size == 0 {
@@ -133,7 +150,6 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 	if workers < 1 {
 		workers = 1
 	}
-	errCh := make(chan error, workers)
 
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
@@ -141,21 +157,32 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 			defer wg.Done()
 			for j := range jobs {
 				if err := ctx.Err(); err != nil {
-					errCh <- err
 					return
 				}
-				copied, skipped, failed, n, err := transferOne(ctx, cfg, src, dst, j.meta, journ, idx, tuner)
-				atomic.AddInt64(&stats.FilesCopied, copied)
-				atomic.AddInt64(&stats.FilesSkipped, skipped)
-				atomic.AddInt64(&stats.FilesFailed, failed)
-				atomic.AddInt64(&stats.BytesCopied, n)
-				if err != nil && cfg.Verbose {
-					fmt.Fprintf(os.Stderr, "warn %s: %v\n", j.meta.RelPath, err)
+				res := transferOne(ctx, cfg, src, dst, j.meta, journ, idx, tuner, limiter)
+				atomic.AddInt64(&stats.FilesCopied, res.copied)
+				atomic.AddInt64(&stats.FilesSkipped, res.skipped)
+				atomic.AddInt64(&stats.FilesFailed, res.failed)
+				atomic.AddInt64(&stats.BytesCopied, res.bytes)
+				atomic.AddInt64(&stats.BytesPayload, res.bytes)
+				atomic.AddInt64(&stats.ChunksReused, res.reused)
+				atomic.AddInt64(&stats.ChunksSent, res.sent)
+				if res.err != nil && cfg.Verbose {
+					fmt.Fprintf(os.Stderr, "warn %s: %v\n", j.meta.RelPath, res.err)
+				}
+				if cfg.TestAfterFile != nil {
+					status := "failed"
+					if res.skipped > 0 {
+						status = "skipped"
+					} else if res.copied > 0 {
+						status = "ok"
+					}
+					cfg.TestAfterFile(j.meta.RelPath, status)
 				}
 				tuner.Observe(autotune.Sample{
-					BytesVerified: n,
+					BytesVerified: res.bytes,
 					Elapsed:       time.Second,
-					ErrorRate:     float64(failed),
+					ErrorRate:     float64(res.failed),
 					CPUPercent:    20,
 					CompressRatio: 1.2,
 					RTTMs:         10,
@@ -164,7 +191,6 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 		}()
 	}
 	wg.Wait()
-	close(errCh)
 	_ = tuner.Save()
 
 	if cfg.SyncMode && cfg.Delete && !cfg.DryRun {
@@ -185,16 +211,17 @@ func transferOne(
 	journ *journal.Journal,
 	idx *index.Cache,
 	tuner *autotune.Tuner,
-) (copied, skipped, failed, bytes int64, err error) {
+	limiter *transfer.Limiter,
+) fileResult {
 	attempts := 0
 	for {
 		attempts++
-		n, status, err := tryTransfer(ctx, cfg, src, dst, meta, journ, idx, tuner)
+		n, reused, sent, status, err := tryTransfer(ctx, cfg, src, dst, meta, journ, idx, tuner, limiter)
 		if status == "skipped" {
-			return 0, 1, 0, 0, nil
+			return fileResult{skipped: 1}
 		}
 		if status == "ok" {
-			return 1, 0, 0, n, nil
+			return fileResult{copied: 1, bytes: n, reused: reused, sent: sent}
 		}
 		if err != nil && isUnstable(err) {
 			if cfg.SkipUnstable || attempts >= cfg.MaxFileAttempts {
@@ -204,7 +231,7 @@ func transferOne(
 						Attempts: attempts, LastError: err.Error(),
 					})
 				}
-				return 0, 0, 1, 0, err
+				return fileResult{failed: 1, err: err}
 			}
 			time.Sleep(time.Duration(attempts) * 200 * time.Millisecond)
 			if nm, e := src.Stat(ctx, meta.RelPath); e == nil {
@@ -219,9 +246,9 @@ func transferOne(
 					Attempts: attempts, LastError: err.Error(),
 				})
 			}
-			return 0, 0, 1, 0, err
+			return fileResult{failed: 1, err: err}
 		}
-		return 0, 0, 1, 0, err
+		return fileResult{failed: 1, err: err}
 	}
 }
 
@@ -240,11 +267,12 @@ func tryTransfer(
 	journ *journal.Journal,
 	idx *index.Cache,
 	tuner *autotune.Tuner,
-) (int64, string, error) {
+	limiter *transfer.Limiter,
+) (bytes, reused, sent int64, status string, err error) {
 	if cfg.StableWindow > 0 {
 		fi := fsmeta.FileInfo{ModTime: meta.ModTime, Size: meta.Size}
 		if !fsmeta.UnchangedFor(fi, cfg.StableWindow) {
-			return 0, "failed", unstableError{fmt.Errorf("file not stable yet")}
+			return 0, 0, 0, "failed", unstableError{fmt.Errorf("file not stable yet")}
 		}
 	}
 
@@ -252,36 +280,34 @@ func tryTransfer(
 	if journ != nil && cfg.Resume {
 		if e, ok := journ.Get(meta.RelPath); ok && e.Status == journal.StatusComplete {
 			if e.SrcSize == gen.Size && e.SrcModNano == gen.ModNano && !cfg.Checksum {
-				return 0, "skipped", nil
+				return 0, 0, 0, "skipped", nil
 			}
 		}
 	}
 
-	// Quick skip: same size+mtime on dest.
 	if !cfg.Checksum {
 		if dm, err := dst.Stat(ctx, meta.RelPath); err == nil {
 			if dm.Size == meta.Size && dm.ModTime.UnixNano() == meta.ModTime.UnixNano() {
-				return 0, "skipped", nil
+				return 0, 0, 0, "skipped", nil
 			}
 		}
 	}
 
 	rc, err := src.OpenRead(ctx, meta.RelPath)
 	if err != nil {
-		return 0, "failed", err
+		return 0, 0, 0, "failed", err
 	}
 	prof := tuner.Profile()
 	opt := chunk.Options{AvgSize: prof.FrameSize, KeepData: true}
 	sig, err := chunk.ChunkReader(rc, meta.Size, opt)
 	_ = rc.Close()
 	if err != nil {
-		return 0, "failed", err
+		return 0, 0, 0, "failed", err
 	}
 
-	// Re-check generation after read.
 	if st, err := src.Stat(ctx, meta.RelPath); err == nil {
 		if st.Size != gen.Size || st.ModTime.UnixNano() != gen.ModNano {
-			return 0, "failed", unstableError{fmt.Errorf("source changed during read")}
+			return 0, 0, 0, "failed", unstableError{fmt.Errorf("source changed during read")}
 		}
 	}
 
@@ -298,12 +324,23 @@ func tryTransfer(
 	}
 
 	if !delta.NeedsTransfer(sig, destSig, cfg.Checksum) && sig.Digest == destSig.Digest {
-		return 0, "skipped", nil
+		return 0, 0, 0, "skipped", nil
 	}
 	plan := delta.Diff(sig, destSig)
+	missingSet := make(map[chunk.Digest]struct{}, len(plan.Missing))
+	for _, c := range plan.Missing {
+		missingSet[c.Digest] = struct{}{}
+	}
 
 	if cfg.DryRun {
-		return int64(meta.Size), "ok", nil
+		var payload int64
+		for _, c := range plan.Missing {
+			payload += int64(c.Length)
+		}
+		if payload == 0 && sig.Digest != destSig.Digest {
+			payload = sig.Size
+		}
+		return payload, int64(plan.Reuse), int64(len(plan.Missing)), "ok", nil
 	}
 
 	if journ != nil {
@@ -315,48 +352,65 @@ func tryTransfer(
 
 	ws, err := dst.BeginWrite(ctx, meta.RelPath, sig.Size)
 	if err != nil {
-		return 0, "failed", err
+		return 0, 0, 0, "failed", err
 	}
 
-	// Build lookup of source chunk data.
-	byOff := map[uint64]chunk.Chunk{}
-	for _, c := range sig.Chunks {
-		byOff[c.Offset] = c
-	}
-
-	// Always write all source chunks into temp for perfect assembly.
-	// Delta still avoids reading/sending when remote ApplyDelta exists; for local we write missing only if dest temp seeded — simplify: write all chunks from source data we hold.
-	var sent int64
+	var payload int64
+	var chunksSent int64
 	codecPref := prof.Compress
 	for _, c := range sig.Chunks {
 		data := c.Data
 		if data == nil {
-			return 0, "failed", ws.Abort()
-		}
-		codec, payload, err := compress.Encode(codecPref, data)
-		if err != nil {
 			_ = ws.Abort()
-			return 0, "failed", err
+			return 0, 0, 0, "failed", fmt.Errorf("missing chunk data")
 		}
-		if err := ws.WriteChunk(ctx, c.Offset, codec, len(data), payload); err != nil {
-			_ = ws.Abort()
-			return 0, "failed", err
+		_, isMissing := missingSet[c.Digest]
+		if isMissing || len(destSig.Chunks) == 0 {
+			if err := limiter.Wait(ctx, len(data)); err != nil {
+				_ = ws.Abort()
+				return 0, 0, 0, "failed", err
+			}
+			codec, enc, err := compress.Encode(codecPref, data)
+			if err != nil {
+				_ = ws.Abort()
+				return 0, 0, 0, "failed", err
+			}
+			if err := ws.WriteChunk(ctx, c.Offset, codec, len(data), enc); err != nil {
+				_ = ws.Abort()
+				return 0, 0, 0, "failed", err
+			}
+			payload += int64(len(data))
+			chunksSent++
+		} else {
+			// Reused content: still materialize into temp from local source bytes
+			// (already held) but do not count as wire payload.
+			if err := ws.WriteChunk(ctx, c.Offset, compress.CodecNone, len(data), data); err != nil {
+				_ = ws.Abort()
+				return 0, 0, 0, "failed", err
+			}
 		}
-		sent += int64(len(data))
-		_ = plan
 	}
 
-	// Final live-change check before commit.
 	if st, err := src.Stat(ctx, meta.RelPath); err == nil {
 		if st.Size != gen.Size || st.ModTime.UnixNano() != gen.ModNano {
 			_ = ws.Abort()
-			return 0, "failed", unstableError{fmt.Errorf("source changed before finalize")}
+			return 0, 0, 0, "failed", unstableError{fmt.Errorf("source changed before finalize")}
+		}
+	}
+
+	if cfg.TestBeforeCommit != nil {
+		cfg.TestBeforeCommit(meta.RelPath)
+		if st, err := src.Stat(ctx, meta.RelPath); err == nil {
+			if st.Size != gen.Size || st.ModTime.UnixNano() != gen.ModNano {
+				_ = ws.Abort()
+				return 0, 0, 0, "failed", unstableError{fmt.Errorf("source changed before finalize")}
+			}
 		}
 	}
 
 	if err := ws.Commit(ctx, sig.Digest, meta.Mode, meta.ModTime); err != nil {
 		_ = ws.Abort()
-		return 0, "failed", err
+		return 0, 0, 0, "failed", err
 	}
 
 	if idx != nil {
@@ -371,7 +425,7 @@ func tryTransfer(
 			ChunksDone: len(sig.Chunks),
 		})
 	}
-	return sent, "ok", nil
+	return payload, int64(plan.Reuse), chunksSent, "ok", nil
 }
 
 func stripData(in []chunk.Chunk) []chunk.Chunk {

@@ -170,15 +170,25 @@ go vet ./...
 make build
 ```
 
-Useful targets:
+### Testing
 
 | Make target | What it does |
 |-------------|--------------|
-| `make build` | Native binary → `bin/quiksync` |
-| `make build-all` | All OS/arch → `dist/` |
-| `make test` | `go test ./...` |
+| `make test` | Unit + integration (`go test ./...`) |
+| `make test-race` | Race detector |
+| `make test-cover` | Coverage HTML → `testdata/artifacts/coverage.html` |
+| `make bench` | Benchmarks → `testdata/artifacts/bench.txt` |
+| `make test-efficiency` | Soak/efficiency report (longer; not in default CI) |
 | `make lint` | `go vet ./...` |
-| `make release` | Cross-build + `checksums.txt` |
+| `make clean` | Remove `bin/`, `dist/`, and test artifacts |
+
+All generated trees, coverage, benches, and soak output go under **`testdata/artifacts/`** (gitignored). Prefer `t.TempDir()` in tests; do not commit soak trees.
+
+```bash
+make test && make test-race
+make bench
+make test-efficiency   # writes testdata/artifacts/efficiency-report.md
+```
 
 Fuzz (optional):
 
@@ -188,6 +198,8 @@ go test -fuzz=FuzzReadWriteMsg -fuzztime=30s ./internal/protocol/
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for PR guidelines.
+
+Useful build targets: `make build`, `make build-all`, `make release`.
 
 ### Release
 

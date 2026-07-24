@@ -15,8 +15,12 @@ jobs:
           go-version-file: go.mod
       - name: Test
         run: go test ./...
+      - name: Race
+        run: go test -race ./...
       - name: Vet
         run: go vet ./...
+      - name: Short benchmarks
+        run: go test -bench=. -benchtime=200ms -count=1 ./internal/chunk/ ./internal/compress/ ./internal/engine/
       - name: Fuzz smoke
         run: |
           go test -fuzz=FuzzChunkReader -fuzztime=10s ./internal/chunk/

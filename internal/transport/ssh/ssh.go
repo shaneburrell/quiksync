@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sync"
 	"time"
 
 	"github.com/shaneburrell/quiksync/internal/chunk"
@@ -14,12 +15,16 @@ import (
 	"github.com/shaneburrell/quiksync/internal/transport"
 )
 
+// Command is the SSH executable (overridable in tests).
+var Command = "ssh"
+
 // Transport talks to a remote `quiksync remote-helper` over SSH stdio.
 type Transport struct {
 	ep     transport.Endpoint
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 	stdout io.ReadCloser
+	mu     sync.Mutex
 }
 
 func New(ep transport.Endpoint) (*Transport, error) {
@@ -33,7 +38,7 @@ func New(ep transport.Endpoint) (*Transport, error) {
 	}
 	args = append(args, target, "quiksync", "remote-helper")
 	// Prefer remote-helper with root via env; pass root as first protocol hello.
-	cmd := exec.Command("ssh", args...)
+	cmd := exec.Command(Command, args...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -74,6 +79,8 @@ func (t *Transport) Caps() transport.Caps {
 }
 
 func (t *Transport) Close() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	_ = protocol.WriteMsg(t.stdin, protocol.MsgBye, nil)
 	_ = t.stdin.Close()
 	_ = t.stdout.Close()
@@ -86,6 +93,8 @@ func (t *Transport) Close() error {
 func (t *Transport) Root() string { return t.ep.Path }
 
 func (t *Transport) Walk(ctx context.Context, exclude []string) ([]transport.FileMeta, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	if err := protocol.WriteJSON(t.stdin, protocol.MsgWalk, protocol.WalkReq{Exclude: exclude}); err != nil {
 		return nil, err
 	}
@@ -113,6 +122,8 @@ func (t *Transport) Walk(ctx context.Context, exclude []string) ([]transport.Fil
 }
 
 func (t *Transport) Stat(ctx context.Context, rel string) (transport.FileMeta, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	if err := protocol.WriteJSON(t.stdin, protocol.MsgStat, protocol.PathReq{Rel: rel}); err != nil {
 		return transport.FileMeta{}, err
 	}
@@ -142,16 +153,19 @@ type readCloser struct {
 }
 
 func (t *Transport) OpenRead(ctx context.Context, rel string) (io.ReadCloser, error) {
+	t.mu.Lock()
 	if err := protocol.WriteJSON(t.stdin, protocol.MsgOpenRead, protocol.PathReq{Rel: rel}); err != nil {
+		t.mu.Unlock()
 		return nil, err
 	}
-	return &remoteReader{t: t}, nil
+	return &remoteReader{t: t, locked: true}, nil
 }
 
 type remoteReader struct {
-	t    *Transport
-	left []byte
-	eof  bool
+	t      *Transport
+	left   []byte
+	eof    bool
+	locked bool
 }
 
 func (r *remoteReader) Read(p []byte) (int, error) {
@@ -181,9 +195,31 @@ func (r *remoteReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-func (r *remoteReader) Close() error { return nil }
+func (r *remoteReader) Close() error {
+	for !r.eof {
+		buf := make([]byte, 64*1024)
+		_, err := r.Read(buf)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			if r.locked {
+				r.t.mu.Unlock()
+				r.locked = false
+			}
+			return err
+		}
+	}
+	if r.locked {
+		r.t.mu.Unlock()
+		r.locked = false
+	}
+	return nil
+}
 
 func (t *Transport) Remove(ctx context.Context, rel string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	if err := protocol.WriteJSON(t.stdin, protocol.MsgRemove, protocol.PathReq{Rel: rel}); err != nil {
 		return err
 	}
@@ -191,6 +227,8 @@ func (t *Transport) Remove(ctx context.Context, rel string) error {
 }
 
 func (t *Transport) MkdirAll(ctx context.Context, rel string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	if err := protocol.WriteJSON(t.stdin, protocol.MsgMkdir, protocol.PathReq{Rel: rel}); err != nil {
 		return err
 	}
@@ -198,6 +236,8 @@ func (t *Transport) MkdirAll(ctx context.Context, rel string) error {
 }
 
 func (t *Transport) GetSignature(ctx context.Context, rel string) (chunk.FileSignature, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	if err := protocol.WriteJSON(t.stdin, protocol.MsgGetSig, protocol.PathReq{Rel: rel}); err != nil {
 		return chunk.FileSignature{}, err
 	}
@@ -220,10 +260,13 @@ type writeSession struct {
 }
 
 func (t *Transport) BeginWrite(ctx context.Context, rel string, size int64) (transport.WriteSession, error) {
+	t.mu.Lock()
 	if err := protocol.WriteJSON(t.stdin, protocol.MsgBeginWrite, protocol.BeginWriteReq{Rel: rel, Size: size}); err != nil {
+		t.mu.Unlock()
 		return nil, err
 	}
 	if err := expectOK(t.stdout); err != nil {
+		t.mu.Unlock()
 		return nil, err
 	}
 	return &writeSession{t: t}, nil
@@ -239,6 +282,7 @@ func (w *writeSession) WriteChunk(ctx context.Context, offset uint64, codec comp
 }
 
 func (w *writeSession) Commit(ctx context.Context, expected chunk.Digest, mode os.FileMode, modTime time.Time) error {
+	defer w.t.mu.Unlock()
 	if err := protocol.WriteJSON(w.t.stdin, protocol.MsgCommit, protocol.CommitReq{
 		Digest: expected, Mode: uint32(mode), ModNano: modTime.UnixNano(),
 	}); err != nil {
@@ -248,6 +292,7 @@ func (w *writeSession) Commit(ctx context.Context, expected chunk.Digest, mode o
 }
 
 func (w *writeSession) Abort() error {
+	defer w.t.mu.Unlock()
 	_ = protocol.WriteMsg(w.t.stdin, protocol.MsgAbort, nil)
 	return expectOK(w.t.stdout)
 }

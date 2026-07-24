@@ -13,6 +13,21 @@ var (
 )
 
 func Execute() error {
+	return ExecuteArgs(os.Args[1:])
+}
+
+// ExecuteArgs runs the CLI with the given arguments (excluding program name).
+func ExecuteArgs(args []string) error {
+	root := newRoot()
+	root.SetArgs(args)
+	if err := root.Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return err
+	}
+	return nil
+}
+
+func newRoot() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "quiksync",
 		Short: "Resilient one-way file copy and sync",
@@ -30,12 +45,7 @@ live-change detection, and runtime autotuning of streams, frame sizes, and compr
 	root.AddCommand(newVerifyCmd())
 	root.AddCommand(newServeCmd())
 	root.AddCommand(newRemoteHelperCmd())
-
-	if err := root.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		return err
-	}
-	return nil
+	return root
 }
 
 func commonTransferFlags(cmd *cobra.Command, opts *TransferFlags) {
