@@ -1,0 +1,11 @@
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+.DS_Store
+.quiksync/
+.quiksync.tmp/
+testdata/local/
+coverage.out
+**/testdata/fuzz/

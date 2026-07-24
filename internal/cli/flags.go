@@ -1,0 +1,21 @@
+package cli
+
+import "time"
+
+// TransferFlags holds shared copy/sync options.
+type TransferFlags struct {
+	Resume          bool
+	DryRun          bool
+	Exclude         []string
+	Checksum        bool
+	StableWindow    time.Duration
+	BandwidthLimit  int64
+	SkipUnstable    bool
+	MaxFileAttempts int
+	Auto            bool
+	Streams         int
+	Compress        string
+	ChunkSize       string
+	ProfilePath     string
+	Delete          bool
+}
