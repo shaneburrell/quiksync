@@ -10,12 +10,12 @@ import (
 
 // FileInfo is portable metadata for a source/dest path.
 type FileInfo struct {
-	RelPath  string
-	AbsPath  string
-	Size     int64
-	ModTime  time.Time
-	Mode     os.FileMode
-	IsDir    bool
+	RelPath   string
+	AbsPath   string
+	Size      int64
+	ModTime   time.Time
+	Mode      os.FileMode
+	IsDir     bool
 	IsSymlink bool
 }
 

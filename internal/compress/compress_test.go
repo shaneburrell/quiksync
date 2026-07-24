@@ -31,7 +31,6 @@ func TestEncodeFallbackOnIncompressible(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// May fall back to none if expansion.
 	if used == CodecNone && !bytes.Equal(enc, data) {
 		t.Fatal("none should return original")
 	}
@@ -44,12 +43,33 @@ func TestEncodeFallbackOnIncompressible(t *testing.T) {
 	}
 }
 
-func TestParse(t *testing.T) {
-	c, err := Parse("zstd")
-	if err != nil || c != CodecZstd {
-		t.Fatal(c, err)
+func TestParseAndString(t *testing.T) {
+	for _, s := range []string{"none", "lz4", "zstd", "auto"} {
+		c, err := Parse(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.String() == "" {
+			t.Fatal("empty string")
+		}
 	}
 	if _, err := Parse("gzip"); err == nil {
 		t.Fatal("expected error")
+	}
+	if Codec(99).String() == "" {
+		t.Fatal("unknown codec string")
+	}
+}
+
+func TestSampleRatio(t *testing.T) {
+	text := bytes.Repeat([]byte("aaaa"), 2000)
+	if SampleRatio(CodecLZ4, text) < 1.05 {
+		t.Fatalf("expected compressible ratio")
+	}
+	if SampleRatio(CodecNone, text) != 1 {
+		t.Fatal("none ratio")
+	}
+	if SampleRatio(CodecLZ4, nil) != 1 {
+		t.Fatal("empty sample")
 	}
 }

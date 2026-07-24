@@ -143,7 +143,7 @@ func TestLiveChangeBeforeCommit(t *testing.T) {
 		},
 	})
 	if err != nil {
-		// engine.Run does not fail the job on file failures
+		t.Fatalf("run: %v", err)
 	}
 	if stats.FilesFailed != 1 {
 		t.Fatalf("expected failed unstable file, got %+v", stats)

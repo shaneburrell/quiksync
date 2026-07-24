@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -39,7 +40,7 @@ func TestQUICRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	files, err := client.Walk(ctx2, nil)
 	if err != nil {
@@ -52,30 +53,12 @@ func TestQUICRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	buf := make([]byte, 64)
-	n, err := rc.Read(buf)
+	all, err := io.ReadAll(rc)
 	_ = rc.Close()
-	if err != nil && err.Error() != "EOF" {
-		// Read may return n>0 with EOF on next call
+	if err != nil {
+		t.Fatal(err)
 	}
-	if string(buf[:n]) != "quic-hello" && n == 0 {
-		// try full read
-		rc, err = client.OpenRead(ctx2, "q.txt")
-		if err != nil {
-			t.Fatal(err)
-		}
-		all := make([]byte, 0, 16)
-		tmp := make([]byte, 8)
-		for {
-			nn, er := rc.Read(tmp)
-			all = append(all, tmp[:nn]...)
-			if er != nil {
-				break
-			}
-		}
-		_ = rc.Close()
-		if string(all) != "quic-hello" {
-			t.Fatalf("got %q", all)
-		}
+	if string(all) != "quic-hello" {
+		t.Fatalf("got %q", all)
 	}
 }

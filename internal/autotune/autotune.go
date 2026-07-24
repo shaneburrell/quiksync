@@ -154,9 +154,6 @@ func (t *Tuner) Probe(sample []byte, rttMs float64) Profile {
 		if zstr >= 1.20 {
 			codecCandidates = append(codecCandidates, compress.CodecZstd)
 		}
-		if len(codecCandidates) == 1 { // only none
-			// keep none
-		}
 	} else {
 		codecCandidates = []compress.Codec{t.cfg.Compress}
 	}
@@ -179,9 +176,10 @@ func (t *Tuner) Probe(sample []byte, rttMs float64) Profile {
 					ratio = compress.SampleRatio(c, sample)
 				}
 				cpuCost := 1.0
-				if c == compress.CodecZstd {
+				switch c {
+				case compress.CodecZstd:
 					cpuCost = 1.25
-				} else if c == compress.CodecLZ4 {
+				case compress.CodecLZ4:
 					cpuCost = 1.05
 				}
 				bdpFactor := 1.0 + math.Min(rttMs/50.0, 3.0)*float64(s)/4.0

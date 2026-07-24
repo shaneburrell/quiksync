@@ -1,8 +1,11 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo 0.1.0)
 BINARY  := quiksync
 LDFLAGS := -s -w -X github.com/shaneburrell/quiksync/internal/cli.version=$(VERSION)
+COVER_PKG := ./internal/...
+COVER_MIN ?= 70
 
-.PHONY: build build-all test test-race test-cover bench test-efficiency lint release clean
+.PHONY: build build-all test test-race test-cover bench test-efficiency \
+	fmt lint vet tidy check cover release clean tools
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/quiksync
@@ -22,10 +25,13 @@ test:
 test-race:
 	go test -race ./...
 
-test-cover:
+test-cover cover:
 	mkdir -p testdata/artifacts
-	go test -coverprofile=testdata/artifacts/coverage.out ./...
+	go test $(COVER_PKG) -coverprofile=testdata/artifacts/coverage.out -covermode=atomic
 	go tool cover -html=testdata/artifacts/coverage.out -o testdata/artifacts/coverage.html
+	@total=$$(go tool cover -func=testdata/artifacts/coverage.out | awk '/^total:/{print $$3}' | tr -d '%'); \
+	echo "total coverage: $${total}% (min $(COVER_MIN)%)"; \
+	awk -v t="$$total" -v m="$(COVER_MIN)" 'BEGIN{ if (t+0 < m+0) { printf("coverage %.1f%% is below %s%% gate\n", t, m); exit 1 } }'
 
 bench:
 	mkdir -p testdata/artifacts
@@ -35,8 +41,24 @@ test-efficiency:
 	mkdir -p testdata/artifacts
 	go test -tags=efficiency -timeout 20m ./internal/engine/ -run TestEfficiencyReport -v
 
-lint:
+fmt:
+	gofmt -w $$(go list -f '{{.Dir}}' ./...)
+	goimports -w $$(go list -f '{{.Dir}}' ./...) 2>/dev/null || true
+
+vet:
 	go vet ./...
+
+lint:
+	golangci-lint run ./...
+
+tidy:
+	go mod tidy
+
+check: tidy fmt vet lint test-race cover
+
+tools:
+	go install golang.org/x/tools/cmd/goimports@latest
+	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.3
 
 release: build-all
 	cd dist && shasum -a 256 * > checksums.txt

@@ -10,27 +10,27 @@ Thanks for helping improve QuikSync. This project aims to stay **correct first**
 ```bash
 git clone https://github.com/shaneburrell/quiksync.git
 cd quiksync
-go test ./...
-make test-race
+make tools
+make check
 make build
 ```
 
 ### Test artifacts
 
-Generated coverage, benches, and soak reports land in `testdata/artifacts/` (gitignored). Run `make clean` to remove them. Never commit soak trees or `coverage.out`.
+Generated coverage, benches, and soak reports land in `testdata/artifacts/` (gitignored). Run `make clean` to remove them. Never commit soak trees or coverage files.
 
 | Command | Purpose |
 |---------|---------|
-| `make test` | Default suite |
-| `make test-race` | Data-race checks |
+| `make fmt` | Format with gofmt/goimports |
+| `make lint` | golangci-lint (errcheck, staticcheck, revive, …) |
+| `make check` | Full local gate: tidy, fmt, vet, lint, race, coverage ≥70% |
+| `make cover` | Coverage HTML + threshold |
 | `make bench` | Microbenchmarks |
 | `make test-efficiency` | Longer goodput/delta/bwlimit soak report |
 
 ## Before you open a PR
 
-- [ ] `go test ./...` passes
-- [ ] `go test -race ./...` passes (or `make test-race`)
-- [ ] `go vet ./...` is clean
+- [ ] `make check` passes (or equivalent: fmt, lint, race, cover)
 - [ ] New behavior has tests when practical (especially integrity / resume / delta paths)
 - [ ] README or flag help updated if you change the user-facing CLI
 - [ ] No secrets, soak output, or local artifact paths committed

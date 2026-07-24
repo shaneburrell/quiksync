@@ -78,12 +78,12 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 	if err != nil {
 		return Stats{}, fmt.Errorf("source: %w", err)
 	}
-	defer src.Close()
+	defer func() { _ = src.Close() }()
 	dst, err := openTransport(dstEP)
 	if err != nil {
 		return Stats{}, fmt.Errorf("dest: %w", err)
 	}
-	defer dst.Close()
+	defer func() { _ = dst.Close() }()
 
 	jobID := "job"
 	if cfg.Resume {
@@ -494,12 +494,12 @@ func Verify(ctx context.Context, source, dest string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer src.Close()
+	defer func() { _ = src.Close() }()
 	dst, err := openTransport(dstEP)
 	if err != nil {
 		return nil, err
 	}
-	defer dst.Close()
+	defer func() { _ = dst.Close() }()
 
 	files, err := src.Walk(ctx, nil)
 	if err != nil {

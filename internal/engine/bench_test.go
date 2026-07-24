@@ -52,4 +52,3 @@ func BenchmarkDeltaAppend(b *testing.B) {
 		}
 	}
 }
-

@@ -47,7 +47,7 @@ func RunRemoteHelperRoot(ctx context.Context, r io.Reader, w io.Writer, defaultR
 		_ = protocol.WriteJSON(w, protocol.MsgErr, protocol.ErrMsg{Error: err.Error()})
 		return err
 	}
-	defer lt.Close()
+	defer func() { _ = lt.Close() }()
 	if err := protocol.WriteJSON(w, protocol.MsgHelloOK, protocol.Hello{Version: "1", Root: lt.Root()}); err != nil {
 		return err
 	}

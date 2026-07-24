@@ -26,7 +26,7 @@ func TestProbeDisablesCompressOnIncompressible(t *testing.T) {
 	}
 	// Mix with a second chaotic pass so LZ4/zstd cannot find runs.
 	for i := range sample {
-		sample[i] ^= byte((i * 214013 + 2531011) >> 8)
+		sample[i] ^= byte((i*214013 + 2531011) >> 8)
 	}
 	p := tu.Probe(sample, 10)
 	if p.Compress != compress.CodecNone {

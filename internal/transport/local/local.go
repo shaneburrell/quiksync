@@ -91,7 +91,7 @@ func (t *Transport) GetSignature(ctx context.Context, rel string) (chunk.FileSig
 		}
 		return chunk.FileSignature{}, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	st, err := f.Stat()
 	if err != nil {
 		return chunk.FileSignature{}, err
@@ -100,11 +100,11 @@ func (t *Transport) GetSignature(ctx context.Context, rel string) (chunk.FileSig
 }
 
 type writeSession struct {
-	destAbs  string
-	tempAbs  string
-	f        *os.File
-	size     int64
-	written  map[uint64]uint32
+	destAbs string
+	tempAbs string
+	f       *os.File
+	size    int64
+	written map[uint64]uint32
 }
 
 func (t *Transport) BeginWrite(ctx context.Context, rel string, size int64) (transport.WriteSession, error) {

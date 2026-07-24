@@ -146,12 +146,6 @@ func (t *Transport) Stat(ctx context.Context, rel string) (transport.FileMeta, e
 	}, nil
 }
 
-type readCloser struct {
-	t   *Transport
-	buf []byte
-	eof bool
-}
-
 func (t *Transport) OpenRead(ctx context.Context, rel string) (io.ReadCloser, error) {
 	t.mu.Lock()
 	if err := protocol.WriteJSON(t.stdin, protocol.MsgOpenRead, protocol.PathReq{Rel: rel}); err != nil {

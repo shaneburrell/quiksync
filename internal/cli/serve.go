@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/spf13/cobra"
 	"github.com/shaneburrell/quiksync/internal/transport/daemon"
+	"github.com/spf13/cobra"
 )
 
 func newServeCmd() *cobra.Command {

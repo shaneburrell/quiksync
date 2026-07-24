@@ -27,4 +27,12 @@ func TestSaveLoadProfile(t *testing.T) {
 	if pr.Streams != 6 {
 		t.Fatalf("warm start streams=%d", pr.Streams)
 	}
+	tu.profile.Streams = 7
+	if err := tu.Save(); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadProfile(path)
+	if err != nil || loaded.Streams != 7 {
+		t.Fatalf("save/load: %+v %v", loaded, err)
+	}
 }

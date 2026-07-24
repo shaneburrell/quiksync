@@ -11,7 +11,7 @@ import (
 )
 
 func buildConfig(src, dest string, f TransferFlags, syncMode bool) (engine.Config, error) {
-	codec := compress.CodecAuto
+	var codec compress.Codec
 	switch strings.ToLower(f.Compress) {
 	case "auto", "":
 		codec = compress.CodecAuto

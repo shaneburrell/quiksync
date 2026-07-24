@@ -95,14 +95,61 @@ func TestRemoteHelperCopy(t *testing.T) {
 		t.Fatalf("commit failed typ=%d err=%v", typ, err)
 	}
 
+	// mkdir + remove round-trip
+	if err := protocol.WriteJSON(clientW, protocol.MsgMkdir, protocol.PathReq{Rel: "tmpdir"}); err != nil {
+		t.Fatal(err)
+	}
+	if typ, _, err = protocol.ReadMsg(clientR); err != nil || typ != protocol.MsgOK {
+		t.Fatalf("mkdir typ=%d err=%v", typ, err)
+	}
+	if err := protocol.WriteJSON(clientW, protocol.MsgRemove, protocol.PathReq{Rel: "out.txt"}); err != nil {
+		t.Fatal(err)
+	}
+	if typ, _, err = protocol.ReadMsg(clientR); err != nil || typ != protocol.MsgOK {
+		t.Fatalf("remove typ=%d err=%v", typ, err)
+	}
+	// abort an in-progress write
+	if err := protocol.WriteJSON(clientW, protocol.MsgBeginWrite, protocol.BeginWriteReq{Rel: "abort.me", Size: 3}); err != nil {
+		t.Fatal(err)
+	}
+	if typ, _, err = protocol.ReadMsg(clientR); err != nil || typ != protocol.MsgOK {
+		t.Fatal("begin abort")
+	}
+	_ = protocol.WriteMsg(clientW, protocol.MsgAbort, nil)
+	if typ, _, err = protocol.ReadMsg(clientR); err != nil || typ != protocol.MsgOK {
+		t.Fatal("abort")
+	}
+	// rewrite for final assert below
+	if err := protocol.WriteJSON(clientW, protocol.MsgBeginWrite, protocol.BeginWriteReq{Rel: "out.txt", Size: int64(len(data))}); err != nil {
+		t.Fatal(err)
+	}
+	if typ, _, err = protocol.ReadMsg(clientR); err != nil || typ != protocol.MsgOK {
+		t.Fatal("begin rewrite")
+	}
+	for _, c := range sig.Chunks {
+		if err := protocol.WriteJSON(clientW, protocol.MsgWriteChunk, protocol.WriteChunkReq{
+			Offset: c.Offset, Codec: compress.CodecNone, UncompressedLen: len(c.Data), Data: c.Data,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if typ, _, err = protocol.ReadMsg(clientR); err != nil || typ != protocol.MsgOK {
+			t.Fatal("rewrite chunk")
+		}
+	}
+	if err := protocol.WriteJSON(clientW, protocol.MsgCommit, protocol.CommitReq{
+		Digest: sig.Digest, Mode: 0o644, ModNano: time.Now().UnixNano(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if typ, _, err = protocol.ReadMsg(clientR); err != nil || typ != protocol.MsgOK {
+		t.Fatal("rewrite commit")
+	}
+
 	_ = protocol.WriteMsg(clientW, protocol.MsgBye, nil)
 	_ = clientW.Close()
 	_ = clientR.Close()
 	select {
-	case err := <-errCh:
-		if err != nil && err != io.EOF {
-			// helper may return nil on bye
-		}
+	case <-errCh:
 	case <-time.After(2 * time.Second):
 		t.Fatal("helper timeout")
 	}

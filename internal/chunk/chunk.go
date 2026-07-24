@@ -54,9 +54,9 @@ func Sum(data []byte) Digest {
 
 // Options controls FastCDC parameters.
 type Options struct {
-	AvgSize uint32
-	MinSize uint32
-	MaxSize uint32
+	AvgSize  uint32
+	MinSize  uint32
+	MaxSize  uint32
 	KeepData bool
 }
 

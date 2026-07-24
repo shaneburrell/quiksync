@@ -67,4 +67,19 @@ func TestFakeSSHCopy(t *testing.T) {
 	if string(got) != "ssh-payload" {
 		t.Fatalf("got %q", got)
 	}
+
+	// Exercise walk/stat/read/remove via a second engine sync with delete.
+	if err := os.WriteFile(filepath.Join(remoteRoot, "extra.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stats2, err := engine.Run(context.Background(), engine.Config{
+		Source: src, Dest: dest, SyncMode: true, Delete: true,
+		Tune: autotune.Config{Enabled: false, Compress: compress.CodecNone, Streams: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats2.FilesDeleted != 1 {
+		t.Fatalf("deleted=%d", stats2.FilesDeleted)
+	}
 }

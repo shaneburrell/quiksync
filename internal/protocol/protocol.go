@@ -94,10 +94,10 @@ type Hello struct {
 }
 
 type FileMeta struct {
-	RelPath string    `json:"rel_path"`
-	Size    int64     `json:"size"`
-	ModNano int64     `json:"mod_nano"`
-	Mode    uint32    `json:"mode"`
+	RelPath string `json:"rel_path"`
+	Size    int64  `json:"size"`
+	ModNano int64  `json:"mod_nano"`
+	Mode    uint32 `json:"mode"`
 }
 
 type WalkReq struct {
@@ -131,9 +131,9 @@ type CommitReq struct {
 }
 
 type SigOK struct {
-	Size   int64           `json:"size"`
-	Digest chunk.Digest    `json:"digest"`
-	Chunks []chunk.Chunk   `json:"chunks"`
+	Size   int64         `json:"size"`
+	Digest chunk.Digest  `json:"digest"`
+	Chunks []chunk.Chunk `json:"chunks"`
 }
 
 type ErrMsg struct {
@@ -141,24 +141,24 @@ type ErrMsg struct {
 }
 
 type PeerStats struct {
-	BytesSent     int64   `json:"bytes_sent"`
-	BytesAcked    int64   `json:"bytes_acked"`
-	BytesVerified int64   `json:"bytes_verified"`
-	RTTp50Ms      float64 `json:"rtt_p50_ms"`
-	RTTp95Ms      float64 `json:"rtt_p95_ms"`
-	Retries       int64   `json:"retries"`
-	CompressRatio float64 `json:"compress_ratio"`
-	CPUPercent    float64 `json:"cpu_percent"`
-	ActiveStreams int     `json:"active_streams"`
-	QueueDepth    int     `json:"queue_depth"`
+	BytesSent     int64     `json:"bytes_sent"`
+	BytesAcked    int64     `json:"bytes_acked"`
+	BytesVerified int64     `json:"bytes_verified"`
+	RTTp50Ms      float64   `json:"rtt_p50_ms"`
+	RTTp95Ms      float64   `json:"rtt_p95_ms"`
+	Retries       int64     `json:"retries"`
+	CompressRatio float64   `json:"compress_ratio"`
+	CPUPercent    float64   `json:"cpu_percent"`
+	ActiveStreams int       `json:"active_streams"`
+	QueueDepth    int       `json:"queue_depth"`
 	At            time.Time `json:"at"`
 }
 
 type TuneProfile struct {
-	Streams  int            `json:"streams"`
-	Window   int            `json:"window"`
-	FrameSize uint32        `json:"frame_size"`
-	Compress compress.Codec `json:"compress"`
+	Streams   int            `json:"streams"`
+	Window    int            `json:"window"`
+	FrameSize uint32         `json:"frame_size"`
+	Compress  compress.Codec `json:"compress"`
 }
 
 type OK struct {

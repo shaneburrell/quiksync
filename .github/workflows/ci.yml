@@ -9,22 +9,36 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+          check-latest: true
       - name: Test
         run: go test ./...
       - name: Race
         run: go test -race ./...
       - name: Vet
         run: go vet ./...
+      - name: Lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.11.3
+          args: --timeout=5m
+      - name: Coverage
+        run: |
+          mkdir -p testdata/artifacts
+          go test ./internal/... -coverprofile=testdata/artifacts/coverage.out -covermode=atomic
+          go tool cover -func=testdata/artifacts/coverage.out | tee testdata/artifacts/coverage.txt
+          total=$(go tool cover -func=testdata/artifacts/coverage.out | awk '/^total:/{print $3}' | tr -d '%')
+          echo "total coverage: ${total}%"
+          awk -v t="$total" 'BEGIN{ if (t+0 < 70.0) { printf("coverage %.1f%% is below 70%% gate\n", t); exit 1 } }'
       - name: Short benchmarks
         run: go test -bench=. -benchtime=200ms -count=1 ./internal/chunk/ ./internal/compress/ ./internal/engine/
       - name: Fuzz smoke
         run: |
-          go test -fuzz=FuzzChunkReader -fuzztime=10s ./internal/chunk/
-          go test -fuzz=FuzzReadWriteMsg -fuzztime=5s ./internal/protocol/
+          go test -timeout 3m -fuzz=FuzzChunkReader -fuzztime=10s ./internal/chunk/
+          go test -timeout 3m -fuzz=FuzzReadWriteMsg -fuzztime=5s ./internal/protocol/
 
   build-matrix:
     runs-on: ubuntu-latest
@@ -44,10 +58,11 @@ jobs:
           - goos: windows
             goarch: arm64
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+          check-latest: true
       - name: Build
         env:
           GOOS: ${{ matrix.goos }}

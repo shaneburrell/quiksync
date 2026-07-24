@@ -165,41 +165,43 @@ internal/protocol/      Framed RPC for remote helper / daemon
 ```bash
 git clone https://github.com/shaneburrell/quiksync.git
 cd quiksync
-go test ./...
-go vet ./...
+make tools    # install goimports + golangci-lint
+make check    # tidy, fmt, vet, lint, race tests, coverage gate
 make build
 ```
 
-### Testing
+### Quality commands
 
 | Make target | What it does |
 |-------------|--------------|
-| `make test` | Unit + integration (`go test ./...`) |
+| `make fmt` | `gofmt` + `goimports` |
+| `make lint` | `golangci-lint run` (see `.golangci.yml`) |
+| `make vet` | `go vet ./...` |
+| `make tidy` | `go mod tidy` |
+| `make test` | Unit + integration |
 | `make test-race` | Race detector |
-| `make test-cover` | Coverage HTML → `testdata/artifacts/coverage.html` |
+| `make cover` | Coverage HTML + **70%** gate on `./internal/...` |
+| `make check` | tidy → fmt → vet → lint → race → cover |
 | `make bench` | Benchmarks → `testdata/artifacts/bench.txt` |
-| `make test-efficiency` | Soak/efficiency report (longer; not in default CI) |
-| `make lint` | `go vet ./...` |
+| `make test-efficiency` | Soak/efficiency report (not in default CI) |
 | `make clean` | Remove `bin/`, `dist/`, and test artifacts |
 
-All generated trees, coverage, benches, and soak output go under **`testdata/artifacts/`** (gitignored). Prefer `t.TempDir()` in tests; do not commit soak trees.
+All generated trees, coverage, benches, and soak output go under **`testdata/artifacts/`** (gitignored). Prefer `t.TempDir()` in tests.
 
 ```bash
-make test && make test-race
+make check
 make bench
-make test-efficiency   # writes testdata/artifacts/efficiency-report.md
+make test-efficiency   # → testdata/artifacts/efficiency-report.md
 ```
 
 Fuzz (optional):
 
 ```bash
-go test -fuzz=FuzzChunkReader -fuzztime=30s ./internal/chunk/
-go test -fuzz=FuzzReadWriteMsg -fuzztime=30s ./internal/protocol/
+go test -timeout 3m -fuzz=FuzzChunkReader -fuzztime=30s ./internal/chunk/
+go test -timeout 3m -fuzz=FuzzReadWriteMsg -fuzztime=30s ./internal/protocol/
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for PR guidelines.
-
-Useful build targets: `make build`, `make build-all`, `make release`.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for PR guidelines. Build: `make build`, `make build-all`, `make release`.
 
 ### Release
 

@@ -10,10 +10,10 @@ import (
 )
 
 type cachedSig struct {
-	Size    int64           `json:"size"`
-	ModNano int64           `json:"mod_nano"`
-	Digest  chunk.Digest    `json:"digest"`
-	Chunks  []cachedChunk   `json:"chunks"`
+	Size    int64         `json:"size"`
+	ModNano int64         `json:"mod_nano"`
+	Digest  chunk.Digest  `json:"digest"`
+	Chunks  []cachedChunk `json:"chunks"`
 }
 
 type cachedChunk struct {

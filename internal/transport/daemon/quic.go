@@ -38,7 +38,7 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 	if err != nil {
 		return err
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	for {
 		conn, err := ln.Accept(ctx)
@@ -50,14 +50,14 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 }
 
 func handleConn(ctx context.Context, conn *quic.Conn, defaultRoot string) {
-	defer conn.CloseWithError(0, "bye")
+	defer func() { _ = conn.CloseWithError(0, "bye") }()
 	for {
 		stream, err := conn.AcceptStream(ctx)
 		if err != nil {
 			return
 		}
 		go func(s *quic.Stream) {
-			defer s.Close()
+			defer func() { _ = s.Close() }()
 			_ = RunRemoteHelperRoot(ctx, s, s, defaultRoot)
 		}(stream)
 	}
@@ -227,41 +227,6 @@ func (r *lockedStreamReader) Close() error {
 	r.c.mu.Unlock()
 	return nil
 }
-
-type streamReader struct {
-	r    io.Reader
-	left []byte
-	eof  bool
-}
-
-func (r *streamReader) Read(p []byte) (int, error) {
-	if len(r.left) > 0 {
-		n := copy(p, r.left)
-		r.left = r.left[n:]
-		return n, nil
-	}
-	if r.eof {
-		return 0, io.EOF
-	}
-	typ, payload, err := protocol.ReadMsg(r.r)
-	if err != nil {
-		return 0, err
-	}
-	if typ == protocol.MsgOK {
-		r.eof = true
-		return 0, io.EOF
-	}
-	if typ != protocol.MsgReadData {
-		return 0, fmt.Errorf("unexpected %d", typ)
-	}
-	n := copy(p, payload)
-	if n < len(payload) {
-		r.left = payload[n:]
-	}
-	return n, nil
-}
-
-func (r *streamReader) Close() error { return nil }
 
 func (c *Client) Remove(ctx context.Context, rel string) error {
 	c.mu.Lock()

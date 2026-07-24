@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/spf13/cobra"
 	"github.com/shaneburrell/quiksync/internal/engine"
+	"github.com/spf13/cobra"
 )
 
 func newCopyCmd() *cobra.Command {
