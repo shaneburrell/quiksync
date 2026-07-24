@@ -581,9 +581,13 @@ func tryTransfer(
 			wireBytes += int64(len(enc))
 			chunksSent++
 		} else {
+			if err := limiter.Wait(ctx, len(data)); err != nil {
+				return 0, 0, 0, 0, "failed", 0, 0, err
+			}
 			if err := ws.WriteChunk(ctx, c.Offset, compress.CodecNone, len(data), data); err != nil {
 				return 0, 0, 0, 0, "failed", 0, 0, err
 			}
+			wireBytes += int64(len(data))
 		}
 	}
 

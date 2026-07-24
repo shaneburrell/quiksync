@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"fmt"
 	"io"
@@ -31,6 +32,12 @@ func RunRemoteHelperRoot(ctx context.Context, r io.Reader, w io.Writer, defaultR
 	return RunRemoteHelperOpts(ctx, r, w, HelperOptions{DefaultRoot: defaultRoot})
 }
 
+func authTokenOK(got, want string) bool {
+	sumGot := sha256.Sum256([]byte(got))
+	sumWant := sha256.Sum256([]byte(want))
+	return subtle.ConstantTimeCompare(sumGot[:], sumWant[:]) == 1
+}
+
 // RunRemoteHelperOpts serves the framed protocol with options.
 func RunRemoteHelperOpts(ctx context.Context, r io.Reader, w io.Writer, opts HelperOptions) error {
 	typ, payload, err := protocol.ReadMsg(r)
@@ -45,7 +52,7 @@ func RunRemoteHelperOpts(ctx context.Context, r io.Reader, w io.Writer, opts Hel
 		return err
 	}
 	if opts.AuthToken != "" {
-		if subtle.ConstantTimeCompare([]byte(hello.AuthToken), []byte(opts.AuthToken)) != 1 {
+		if !authTokenOK(hello.AuthToken, opts.AuthToken) {
 			_ = writeErr(w, fmt.Errorf("authentication failed"))
 			return fmt.Errorf("authentication failed")
 		}
@@ -74,6 +81,13 @@ func RunRemoteHelperOpts(ctx context.Context, r io.Reader, w io.Writer, opts Hel
 	}
 
 	var session transport.WriteSession
+	defer func() {
+		if session != nil {
+			_ = session.Abort()
+			session = nil
+		}
+	}()
+
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -91,12 +105,16 @@ func RunRemoteHelperOpts(ctx context.Context, r io.Reader, w io.Writer, opts Hel
 		case protocol.MsgWalk:
 			var req protocol.WalkReq
 			if err := protocol.DecodeJSON(payload, &req); err != nil {
-				_ = writeErr(w, err)
+				if err := writeErr(w, err); err != nil {
+					return err
+				}
 				continue
 			}
 			files, err := lt.Walk(ctx, req.Exclude)
 			if err != nil {
-				_ = writeErr(w, err)
+				if err := writeErr(w, err); err != nil {
+					return err
+				}
 				continue
 			}
 			out := protocol.WalkOK{}
@@ -105,30 +123,42 @@ func RunRemoteHelperOpts(ctx context.Context, r io.Reader, w io.Writer, opts Hel
 					RelPath: f.RelPath, Size: f.Size, ModNano: f.ModTime.UnixNano(), Mode: uint32(f.Mode),
 				})
 			}
-			_ = protocol.WriteJSON(w, protocol.MsgWalkOK, out)
+			if err := protocol.WriteJSON(w, protocol.MsgWalkOK, out); err != nil {
+				return err
+			}
 		case protocol.MsgStat:
 			var req protocol.PathReq
 			if err := protocol.DecodeJSON(payload, &req); err != nil {
-				_ = writeErr(w, err)
+				if err := writeErr(w, err); err != nil {
+					return err
+				}
 				continue
 			}
 			f, err := lt.Stat(ctx, req.Rel)
 			if err != nil {
-				_ = writeErr(w, err)
+				if err := writeErr(w, err); err != nil {
+					return err
+				}
 				continue
 			}
-			_ = protocol.WriteJSON(w, protocol.MsgStatOK, protocol.FileMeta{
+			if err := protocol.WriteJSON(w, protocol.MsgStatOK, protocol.FileMeta{
 				RelPath: f.RelPath, Size: f.Size, ModNano: f.ModTime.UnixNano(), Mode: uint32(f.Mode),
-			})
+			}); err != nil {
+				return err
+			}
 		case protocol.MsgOpenRead:
 			var req protocol.PathReq
 			if err := protocol.DecodeJSON(payload, &req); err != nil {
-				_ = writeErr(w, err)
+				if err := writeErr(w, err); err != nil {
+					return err
+				}
 				continue
 			}
 			rc, err := lt.OpenRead(ctx, req.Rel)
 			if err != nil {
-				_ = writeErr(w, err)
+				if err := writeErr(w, err); err != nil {
+					return err
+				}
 				continue
 			}
 			buf := make([]byte, 64*1024)
@@ -151,14 +181,20 @@ func RunRemoteHelperOpts(ctx context.Context, r io.Reader, w io.Writer, opts Hel
 			}
 			_ = rc.Close()
 			if readErr != nil {
-				_ = writeErr(w, readErr)
+				if err := writeErr(w, readErr); err != nil {
+					return err
+				}
 				continue // do not send MsgOK after MsgErr
 			}
-			_ = protocol.WriteJSON(w, protocol.MsgOK, protocol.OK{OK: true})
+			if err := protocol.WriteJSON(w, protocol.MsgOK, protocol.OK{OK: true}); err != nil {
+				return err
+			}
 		case protocol.MsgBeginWrite:
 			var req protocol.BeginWriteReq
 			if err := protocol.DecodeJSON(payload, &req); err != nil {
-				_ = writeErr(w, err)
+				if err := writeErr(w, err); err != nil {
+					return err
+				}
 				continue
 			}
 			if session != nil {
@@ -168,91 +204,137 @@ func RunRemoteHelperOpts(ctx context.Context, r io.Reader, w io.Writer, opts Hel
 			session, err = lt.BeginWrite(ctx, req.Rel, req.Size)
 			if err != nil {
 				session = nil
-				_ = writeErr(w, err)
+				if err := writeErr(w, err); err != nil {
+					return err
+				}
 				continue
 			}
-			_ = protocol.WriteJSON(w, protocol.MsgOK, protocol.OK{OK: true})
+			if err := protocol.WriteJSON(w, protocol.MsgOK, protocol.OK{OK: true}); err != nil {
+				return err
+			}
 		case protocol.MsgWriteChunk:
 			if session == nil {
-				_ = writeErr(w, fmt.Errorf("no write session"))
+				if err := writeErr(w, fmt.Errorf("no write session")); err != nil {
+					return err
+				}
 				continue
 			}
 			var req protocol.WriteChunkReq
 			if err := protocol.DecodeJSON(payload, &req); err != nil {
-				_ = writeErr(w, err)
+				if err := writeErr(w, err); err != nil {
+					return err
+				}
 				continue
 			}
 			if err := session.WriteChunk(ctx, req.Offset, req.Codec, req.UncompressedLen, req.Data); err != nil {
 				_ = session.Abort()
 				session = nil
-				_ = writeErr(w, err)
+				if err := writeErr(w, err); err != nil {
+					return err
+				}
 				continue
 			}
-			_ = protocol.WriteJSON(w, protocol.MsgOK, protocol.OK{OK: true})
+			if err := protocol.WriteJSON(w, protocol.MsgOK, protocol.OK{OK: true}); err != nil {
+				return err
+			}
 		case protocol.MsgCommit:
 			if session == nil {
-				_ = writeErr(w, fmt.Errorf("no write session"))
+				if err := writeErr(w, fmt.Errorf("no write session")); err != nil {
+					return err
+				}
 				continue
 			}
 			var req protocol.CommitReq
 			if err := protocol.DecodeJSON(payload, &req); err != nil {
-				_ = writeErr(w, err)
+				if err := writeErr(w, err); err != nil {
+					return err
+				}
 				continue
 			}
 			if err := session.Commit(ctx, req.Digest, os.FileMode(req.Mode), time.Unix(0, req.ModNano)); err != nil {
 				_ = session.Abort()
 				session = nil
-				_ = writeErr(w, err)
+				if err := writeErr(w, err); err != nil {
+					return err
+				}
 				continue
 			}
 			session = nil
-			_ = protocol.WriteJSON(w, protocol.MsgOK, protocol.OK{OK: true})
+			if err := protocol.WriteJSON(w, protocol.MsgOK, protocol.OK{OK: true}); err != nil {
+				return err
+			}
 		case protocol.MsgAbort:
 			if session != nil {
 				_ = session.Abort()
 				session = nil
 			}
-			_ = protocol.WriteJSON(w, protocol.MsgOK, protocol.OK{OK: true})
+			if err := protocol.WriteJSON(w, protocol.MsgOK, protocol.OK{OK: true}); err != nil {
+				return err
+			}
 		case protocol.MsgGetSig:
 			var req protocol.PathReq
 			if err := protocol.DecodeJSON(payload, &req); err != nil {
-				_ = writeErr(w, err)
+				if err := writeErr(w, err); err != nil {
+					return err
+				}
 				continue
 			}
 			sig, err := lt.GetSignature(ctx, req.Rel)
 			if err != nil {
-				_ = writeErr(w, err)
+				if err := writeErr(w, err); err != nil {
+					return err
+				}
 				continue
 			}
-			_ = protocol.WriteJSON(w, protocol.MsgSigOK, protocol.SigOK{Size: sig.Size, Digest: sig.Digest, Chunks: sig.Chunks})
+			if err := protocol.WriteJSON(w, protocol.MsgSigOK, protocol.SigOK{Size: sig.Size, Digest: sig.Digest, Chunks: sig.Chunks}); err != nil {
+				return err
+			}
 		case protocol.MsgRemove:
 			var req protocol.PathReq
 			if err := protocol.DecodeJSON(payload, &req); err != nil {
-				_ = writeErr(w, err)
+				if err := writeErr(w, err); err != nil {
+					return err
+				}
 				continue
 			}
 			if err := lt.Remove(ctx, req.Rel); err != nil {
-				_ = writeErr(w, err)
+				if err := writeErr(w, err); err != nil {
+					return err
+				}
 				continue
 			}
-			_ = protocol.WriteJSON(w, protocol.MsgOK, protocol.OK{OK: true})
+			if err := protocol.WriteJSON(w, protocol.MsgOK, protocol.OK{OK: true}); err != nil {
+				return err
+			}
 		case protocol.MsgMkdir:
 			var req protocol.PathReq
 			if err := protocol.DecodeJSON(payload, &req); err != nil {
-				_ = writeErr(w, err)
+				if err := writeErr(w, err); err != nil {
+					return err
+				}
 				continue
 			}
 			if err := lt.MkdirAll(ctx, req.Rel); err != nil {
-				_ = writeErr(w, err)
+				if err := writeErr(w, err); err != nil {
+					return err
+				}
 				continue
 			}
-			_ = protocol.WriteJSON(w, protocol.MsgOK, protocol.OK{OK: true})
+			if err := protocol.WriteJSON(w, protocol.MsgOK, protocol.OK{OK: true}); err != nil {
+				return err
+			}
 		case protocol.MsgPeerStats:
-			_ = protocol.WriteJSON(w, protocol.MsgPeerStats, protocol.PeerStats{At: time.Now().UTC(), CPUPercent: 10})
+			if err := protocol.WriteJSON(w, protocol.MsgPeerStats, protocol.PeerStats{At: time.Now().UTC(), CPUPercent: 10}); err != nil {
+				return err
+			}
 		case protocol.MsgTuneOffer, protocol.MsgTuneApply:
-			_ = protocol.WriteJSON(w, protocol.MsgOK, protocol.OK{OK: true})
+			if err := protocol.WriteJSON(w, protocol.MsgOK, protocol.OK{OK: true}); err != nil {
+				return err
+			}
 		default:
-			_ = writeErr(w, fmt.Errorf("unknown message %d", typ))
+			if err := writeErr(w, fmt.Errorf("unknown message %d", typ)); err != nil {
+				return err
+			}
 		}
 	}
 }
@@ -268,5 +350,5 @@ type ServeConfig struct {
 	KeyFile     string
 	Root        string
 	AuthToken   string
-	AllowNoAuth bool // labs only: permit empty AuthToken
+	AllowNoAuth bool // labs only: permit empty AuthToken on loopback
 }

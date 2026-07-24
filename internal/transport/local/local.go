@@ -146,25 +146,48 @@ func (t *Transport) BeginWrite(ctx context.Context, rel string, size int64) (tra
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return nil, err
 	}
-	tmpRel := filepath.ToSlash(rel) + ".partial"
-	tmp, err := transport.SafeJoin(tmpDir, tmpRel)
-	if err != nil {
-		tmp = filepath.Join(tmpDir, partialTempName(rel))
-	}
-	if err := os.MkdirAll(filepath.Dir(tmp), 0o755); err != nil {
+	// Flat hashed name only — never mirror rel under tmp (symlink escape risk).
+	tmp := filepath.Join(tmpDir, partialTempName(rel))
+	if err := prepareStagingFile(tmp); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_RDWR|os.O_EXCL, 0o644)
 	if err != nil {
 		return nil, err
 	}
 	if size > 0 {
 		if err := f.Truncate(size); err != nil {
 			_ = f.Close()
+			_ = os.Remove(tmp)
 			return nil, err
 		}
 	}
 	return &writeSession{destAbs: dest, tempAbs: tmp, f: f, size: size}, nil
+}
+
+// prepareStagingFile removes any existing path at tmp so OpenFile O_EXCL can
+// create a fresh regular file. Refuses to leave symlinks in place (escape).
+func prepareStagingFile(tmp string) error {
+	fi, err := os.Lstat(tmp)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		if err := os.Remove(tmp); err != nil {
+			return fmt.Errorf("remove staging symlink: %w", err)
+		}
+		return nil
+	}
+	if !fi.Mode().IsRegular() {
+		if err := os.RemoveAll(tmp); err != nil {
+			return fmt.Errorf("remove non-regular staging path: %w", err)
+		}
+		return nil
+	}
+	return os.Remove(tmp)
 }
 
 func (w *writeSession) WriteChunk(ctx context.Context, offset uint64, codec compress.Codec, uncompressedLen int, data []byte) error {

@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Go Reference](https://pkg.go.dev/badge/github.com/shaneburrell/quiksync.svg)](https://pkg.go.dev/github.com/shaneburrell/quiksync)
 
-QuikSync moves files **intact and verifiably** from source → destination. It uses content-defined chunking, crash-safe resume, live-change detection, and runtime autotuning (streams, frame size, compression) so you get strong correctness without hand-tuning every transfer.
+QuikSync copies and syncs files **intact and verifiably** from source → destination. It uses content-defined chunking, crash-safe resume, live-change detection, and runtime autotuning (streams, frame size, compression) so you get strong correctness without hand-tuning every transfer.
 
 ```bash
 quiksync copy ./photos /backup/photos

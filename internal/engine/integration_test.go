@@ -78,6 +78,44 @@ func TestBandwidthLimit(t *testing.T) {
 	}
 }
 
+func TestBandwidthLimitAppliesToReusedChunks(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	base := bytes.Repeat([]byte("The quick brown fox jumps over the lazy dog.\n"), 8000) // ~360KiB
+	writeFile(t, filepath.Join(src, "doc.txt"), base)
+	tune := autotune.Config{Enabled: false, Compress: compress.CodecNone, Streams: 1, ChunkAvg: 16 * 1024}
+	if _, err := engine.Run(context.Background(), engine.Config{
+		Source: src, Dest: dst, Tune: tune,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	appended := append(append([]byte{}, base...), []byte("APPENDIX-TAIL\n")...)
+	writeFile(t, filepath.Join(src, "doc.txt"), appended)
+	_ = os.Chtimes(filepath.Join(src, "doc.txt"), time.Now(), time.Now())
+
+	const rate = 40_000
+	start := time.Now()
+	stats, err := engine.Run(context.Background(), engine.Config{
+		Source: src, Dest: dst, Checksum: true, BandwidthLimit: rate, Tune: tune,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	elapsed := time.Since(start)
+	if stats.ChunksReused < 1 {
+		t.Fatalf("expected reuse, stats=%+v", stats)
+	}
+	// Almost all ~360KiB still WriteChunk'd (reused path); after ~rate burst, rest needs ~8s.
+	// Soft floor catches the pre-fix bypass where reused bytes skipped Wait.
+	min := 2 * time.Second
+	if elapsed < min {
+		t.Fatalf("reused path bypassed bwlimit: elapsed %v < %v (reused=%d wired=%d)",
+			elapsed, min, stats.ChunksReused, stats.BytesWired)
+	}
+	if stats.BytesWired < int64(len(base))/2 {
+		t.Fatalf("wired=%d too low; reused path should count wire bytes", stats.BytesWired)
+	}
+}
+
 func TestTrueResumeFromJournal(t *testing.T) {
 	src, dst := t.TempDir(), t.TempDir()
 	writeFile(t, filepath.Join(src, "one.txt"), []byte("one"))

@@ -3,9 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
-	"net"
 	"os"
-	"strings"
 
 	"github.com/shaneburrell/quiksync/internal/transport/daemon"
 	"github.com/spf13/cobra"
@@ -21,12 +19,6 @@ func newServeCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if authToken == "" {
 				authToken = os.Getenv("QUIKSYNC_AUTH_TOKEN")
-			}
-			if !isLoopbackListen(listen) && authToken == "" {
-				return fmt.Errorf("non-loopback listen %q requires --auth-token", listen)
-			}
-			if authToken == "" && !allowNoAuth {
-				return fmt.Errorf("serve requires --auth-token (or QUIKSYNC_AUTH_TOKEN), or --allow-no-auth for labs")
 			}
 			cfg := daemon.ServeConfig{
 				Listen:      listen,
@@ -47,20 +39,6 @@ func newServeCmd() *cobra.Command {
 	cmd.Flags().StringVar(&authToken, "auth-token", "", "shared secret required by clients (or QUIKSYNC_AUTH_TOKEN)")
 	cmd.Flags().BoolVar(&allowNoAuth, "allow-no-auth", false, "labs only: allow empty auth token")
 	return cmd
-}
-
-func isLoopbackListen(listen string) bool {
-	host, _, err := net.SplitHostPort(listen)
-	if err != nil {
-		// bare port or invalid — treat as non-loopback
-		return false
-	}
-	host = strings.TrimSpace(host)
-	if host == "" || host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }
 
 func newRemoteHelperCmd() *cobra.Command {

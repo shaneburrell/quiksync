@@ -13,18 +13,21 @@ func ParseEndpoint(s string) (Endpoint, error) {
 		return Endpoint{}, fmt.Errorf("empty endpoint")
 	}
 
-	// scp-like user@host:path (but not Windows C:\...)
+	// scp-like [user@]host:path (but not Windows C:\...)
 	if !strings.Contains(s, "://") && strings.Contains(s, ":") && !isWindowsDrive(s) {
+		user := ""
+		rest := s
 		if at := strings.Index(s, "@"); at >= 0 {
-			rest := s
-			user := ""
 			if at > 0 {
 				user = s[:at]
-				rest = s[at+1:]
 			}
-			colon := strings.Index(rest, ":")
-			if colon > 0 {
-				host := rest[:colon]
+			rest = s[at+1:]
+		}
+		colon := strings.Index(rest, ":")
+		if colon > 0 {
+			host := rest[:colon]
+			// Host must not look like a path component (reject "./file:name", "a/b:c").
+			if host != "" && !strings.ContainsAny(host, `/`) {
 				path := rest[colon+1:]
 				if path == "" {
 					path = "."

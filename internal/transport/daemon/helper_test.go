@@ -203,3 +203,44 @@ func TestRemoteHelperCopy(t *testing.T) {
 		t.Fatalf("dest mismatch")
 	}
 }
+
+func TestHelperAbortsSessionOnBye(t *testing.T) {
+	root := t.TempDir()
+	clientR, serverW := io.Pipe()
+	serverR, clientW := io.Pipe()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- RunRemoteHelperRoot(context.Background(), serverR, serverW, root)
+	}()
+	if err := protocol.WriteJSON(clientW, protocol.MsgHello, protocol.Hello{Version: "1"}); err != nil {
+		t.Fatal(err)
+	}
+	if typ, _, err := protocol.ReadMsg(clientR); err != nil || typ != protocol.MsgHelloOK {
+		t.Fatalf("hello: %v", err)
+	}
+	if err := protocol.WriteJSON(clientW, protocol.MsgBeginWrite, protocol.BeginWriteReq{Rel: "leak.txt", Size: 3}); err != nil {
+		t.Fatal(err)
+	}
+	if typ, _, err := protocol.ReadMsg(clientR); err != nil || typ != protocol.MsgOK {
+		t.Fatal("begin write")
+	}
+	tmpDir := filepath.Join(root, ".quiksync.tmp")
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("expected staging temp, err=%v entries=%v", err, entries)
+	}
+	_ = protocol.WriteMsg(clientW, protocol.MsgBye, nil)
+	_ = clientW.Close()
+	select {
+	case <-errCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("helper timeout")
+	}
+	entries, err = os.ReadDir(tmpDir)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err == nil && len(entries) != 0 {
+		t.Fatalf("expected temps cleaned on Bye, got %v", entries)
+	}
+}

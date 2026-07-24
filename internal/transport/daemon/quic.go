@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,8 +21,29 @@ import (
 
 const maxConcurrentStreams = 64
 
+// IsLoopbackListen reports whether listen is a loopback host:port.
+// Empty host (":4242") is not loopback — it binds all interfaces.
+func IsLoopbackListen(listen string) bool {
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		return false
+	}
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // Serve starts a QUIC listener and serves remote-helper sessions.
 func Serve(ctx context.Context, cfg ServeConfig) error {
+	if cfg.AuthToken == "" && !IsLoopbackListen(cfg.Listen) {
+		return fmt.Errorf("non-loopback listen %q requires --auth-token", cfg.Listen)
+	}
 	if cfg.AuthToken == "" && !cfg.AllowNoAuth {
 		return fmt.Errorf("serve requires --auth-token (or QUIKSYNC_AUTH_TOKEN), or --allow-no-auth for labs")
 	}

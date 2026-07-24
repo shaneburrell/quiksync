@@ -110,3 +110,47 @@ func TestAbortRemovesTemp(t *testing.T) {
 		t.Fatal("dest should not exist")
 	}
 }
+
+func TestBeginWriteRejectsStagingSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("SAFE"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tmpDir := filepath.Join(root, ".quiksync.tmp")
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Old nested layout + hashed name: both must not write outside.
+	if err := os.Symlink(secret, filepath.Join(tmpDir, "evil.txt.partial")); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	hashName := partialTempName("evil.txt")
+	if err := os.Symlink(secret, filepath.Join(tmpDir, hashName)); err != nil {
+		t.Fatal(err)
+	}
+
+	tr, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	ws, err := tr.BeginWrite(ctx, "evil.txt", 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ws.WriteChunk(ctx, 0, compress.CodecNone, 4, []byte("pwn!")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ws.Abort(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "SAFE" {
+		t.Fatalf("staging symlink escape: outside became %q", got)
+	}
+}
