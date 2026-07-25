@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/shaneburrell/quiksync/internal/protocol"
+	"github.com/shaneburrell/quiksync/internal/transport"
 )
 
 func TestMapCaps(t *testing.T) {
@@ -20,6 +21,17 @@ func TestMapCaps(t *testing.T) {
 	if !v2.SupportsReuseChunk || !v2.SupportsDelta {
 		t.Fatalf("v2 caps: %+v", v2)
 	}
+	tr := &Transport{ep: transportEndpoint(), caps: v2}
+	if !tr.Caps().SupportsReuseChunk {
+		t.Fatal("Caps passthrough")
+	}
+	if tr.Root() != "/tmp/qs" {
+		t.Fatalf("Root %q", tr.Root())
+	}
+}
+
+func transportEndpoint() transport.Endpoint {
+	return transport.Endpoint{Scheme: "ssh", Path: "/tmp/qs"}
 }
 
 func TestRemoteErrAndExpectOK(t *testing.T) {
