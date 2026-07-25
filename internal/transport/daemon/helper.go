@@ -51,6 +51,10 @@ func RunRemoteHelperOpts(ctx context.Context, r io.Reader, w io.Writer, opts Hel
 	if err := protocol.DecodeJSON(payload, &hello); err != nil {
 		return err
 	}
+	if err := protocol.CheckPeerVersion(hello.Version); err != nil {
+		_ = writeErr(w, err)
+		return err
+	}
 	if opts.AuthToken != "" {
 		if !authTokenOK(hello.AuthToken, opts.AuthToken) {
 			_ = writeErr(w, fmt.Errorf("authentication failed"))
@@ -76,7 +80,11 @@ func RunRemoteHelperOpts(ctx context.Context, r io.Reader, w io.Writer, opts Hel
 		return err
 	}
 	defer func() { _ = lt.Close() }()
-	if err := protocol.WriteJSON(w, protocol.MsgHelloOK, protocol.Hello{Version: "1", Root: lt.Root()}); err != nil {
+	if err := protocol.WriteJSON(w, protocol.MsgHelloOK, protocol.HelloOK{
+		Version: protocol.ProtocolVersion,
+		Root:    lt.Root(),
+		Caps:    protocol.DefaultCaps(),
+	}); err != nil {
 		return err
 	}
 
@@ -235,6 +243,56 @@ func RunRemoteHelperOpts(ctx context.Context, r io.Reader, w io.Writer, opts Hel
 				continue
 			}
 			if err := protocol.WriteJSON(w, protocol.MsgOK, protocol.OK{OK: true}); err != nil {
+				return err
+			}
+		case protocol.MsgReuseChunk:
+			if session == nil {
+				if err := writeErr(w, fmt.Errorf("no write session")); err != nil {
+					return err
+				}
+				continue
+			}
+			var req protocol.ReuseChunkReq
+			if err := protocol.DecodeJSON(payload, &req); err != nil {
+				if err := writeErr(w, err); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := session.ReuseChunk(ctx, req.NewOffset, req.OldOffset, req.Digest, req.Length); err != nil {
+				_ = session.Abort()
+				session = nil
+				if err := writeErr(w, err); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := protocol.WriteJSON(w, protocol.MsgOK, protocol.OK{OK: true}); err != nil {
+				return err
+			}
+		case protocol.MsgRelayNotify:
+			// Wakeup-only: wake local waiters; receivers still verify mid-store state.
+			var meta protocol.RelayNotifyMeta
+			_ = protocol.DecodeJSON(payload, &meta)
+			relayWake(meta.JobID)
+			if err := protocol.WriteJSON(w, protocol.MsgOK, protocol.OK{OK: true}); err != nil {
+				return err
+			}
+		case protocol.MsgRelayWait:
+			var meta protocol.RelayNotifyMeta
+			if err := protocol.DecodeJSON(payload, &meta); err != nil {
+				if err := writeErr(w, err); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := relayWaitJob(ctx, meta.JobID); err != nil {
+				if err := writeErr(w, err); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := protocol.WriteJSON(w, protocol.MsgRelayWaitOK, meta); err != nil {
 				return err
 			}
 		case protocol.MsgCommit:

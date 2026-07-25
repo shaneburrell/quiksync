@@ -25,6 +25,7 @@ type Transport struct {
 	stdin  io.WriteCloser
 	stdout io.ReadCloser
 	mu     sync.Mutex
+	caps   transport.Caps
 }
 
 func New(ctx context.Context, ep transport.Endpoint) (*Transport, error) {
@@ -51,7 +52,7 @@ func New(ctx context.Context, ep transport.Endpoint) (*Transport, error) {
 		return nil, fmt.Errorf("ssh start: %w", err)
 	}
 	t := &Transport{ep: ep, cmd: cmd, stdin: stdin, stdout: stdout}
-	if err := protocol.WriteJSON(t.stdin, protocol.MsgHello, protocol.Hello{Version: "1", Root: ep.Path}); err != nil {
+	if err := protocol.WriteJSON(t.stdin, protocol.MsgHello, protocol.Hello{Version: protocol.ProtocolVersion, Root: ep.Path}); err != nil {
 		_ = t.Close()
 		return nil, err
 	}
@@ -70,12 +71,35 @@ func New(ctx context.Context, ep transport.Endpoint) (*Transport, error) {
 		_ = t.Close()
 		return nil, fmt.Errorf("unexpected hello response %d", typ)
 	}
+	var ok protocol.HelloOK
+	if err := protocol.DecodeJSON(payload, &ok); err != nil {
+		_ = t.Close()
+		return nil, err
+	}
+	if err := protocol.CheckPeerVersion(ok.Version); err != nil {
+		_ = t.Close()
+		return nil, err
+	}
+	t.caps = mapCaps(ok)
+	// SSH is single-stream regardless of remote advertisement.
+	t.caps.SupportsMultiplex = false
 	return t, nil
 }
 
-func (t *Transport) Caps() transport.Caps {
-	return transport.Caps{SupportsDelta: true, SupportsMultiplex: false, SupportsResume: true}
+func mapCaps(ok protocol.HelloOK) transport.Caps {
+	if ok.Version == "" || ok.Version == "1" {
+		// Pre-reuse remotes: full-wire fallback only.
+		return transport.Caps{SupportsDelta: true, SupportsMultiplex: false, SupportsResume: true}
+	}
+	return transport.Caps{
+		SupportsDelta:      ok.Caps.SupportsDelta,
+		SupportsMultiplex:  ok.Caps.SupportsMultiplex,
+		SupportsResume:     ok.Caps.SupportsResume,
+		SupportsReuseChunk: ok.Caps.SupportsReuseChunk,
+	}
 }
+
+func (t *Transport) Caps() transport.Caps { return t.caps }
 
 func (t *Transport) Close() error {
 	t.mu.Lock()
@@ -282,6 +306,54 @@ func (w *writeSession) WriteChunk(ctx context.Context, offset uint64, codec comp
 		return err
 	}
 	return expectOK(w.t.stdout)
+}
+
+func (w *writeSession) ReuseChunk(ctx context.Context, newOffset, oldOffset uint64, digest chunk.Digest, length int) error {
+	if w.committed {
+		return fmt.Errorf("reuse after commit")
+	}
+	if !w.t.caps.SupportsReuseChunk {
+		return fmt.Errorf("remote does not support reuse chunk; upgrade quiksync on the remote host")
+	}
+	if err := protocol.WriteJSON(w.t.stdin, protocol.MsgReuseChunk, protocol.ReuseChunkReq{
+		NewOffset: newOffset, OldOffset: oldOffset, Digest: digest, Length: length,
+	}); err != nil {
+		return err
+	}
+	return expectOK(w.t.stdout)
+}
+
+// RelayNotify sends a wakeup-only mid-hop notify (control plane).
+func (t *Transport) RelayNotify(ctx context.Context, meta protocol.RelayNotifyMeta) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	_ = ctx
+	if err := protocol.WriteJSON(t.stdin, protocol.MsgRelayNotify, meta); err != nil {
+		return err
+	}
+	return expectOK(t.stdout)
+}
+
+// RelayWait asks the peer to acknowledge a wait (paired with store poll).
+func (t *Transport) RelayWait(ctx context.Context, meta protocol.RelayNotifyMeta) (protocol.RelayNotifyMeta, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	_ = ctx
+	if err := protocol.WriteJSON(t.stdin, protocol.MsgRelayWait, meta); err != nil {
+		return protocol.RelayNotifyMeta{}, err
+	}
+	typ, payload, err := protocol.ReadMsg(t.stdout)
+	if err != nil {
+		return protocol.RelayNotifyMeta{}, err
+	}
+	if typ != protocol.MsgRelayWaitOK {
+		return protocol.RelayNotifyMeta{}, remoteErr(typ, payload)
+	}
+	var out protocol.RelayNotifyMeta
+	if err := protocol.DecodeJSON(payload, &out); err != nil {
+		return protocol.RelayNotifyMeta{}, err
+	}
+	return out, nil
 }
 
 func (w *writeSession) Commit(ctx context.Context, expected chunk.Digest, mode os.FileMode, modTime time.Time) error {

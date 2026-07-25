@@ -20,9 +20,7 @@ import (
 	"github.com/shaneburrell/quiksync/internal/progress"
 	"github.com/shaneburrell/quiksync/internal/transfer"
 	"github.com/shaneburrell/quiksync/internal/transport"
-	"github.com/shaneburrell/quiksync/internal/transport/daemon"
-	"github.com/shaneburrell/quiksync/internal/transport/local"
-	sshxfer "github.com/shaneburrell/quiksync/internal/transport/ssh"
+	"github.com/shaneburrell/quiksync/internal/transport/factory"
 )
 
 type Config struct {
@@ -44,6 +42,8 @@ type Config struct {
 	AuthToken       string // QUIC daemon shared secret
 	JobID           string // journal id; default "default"
 	ConfigDir       string // for remote-dest journal/index (QUIKSYNC_CONFIG)
+	S3Endpoint      string
+	S3Region        string
 
 	// LogFile enables tailable job event logging when non-empty.
 	LogFile string
@@ -109,12 +109,22 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 		defer func() { _ = rep.Close() }()
 	}
 
-	src, err := openTransport(ctx, srcEP, cfg.Insecure, cfg.AuthToken)
+	openOpts := transport.OpenOptions{
+		Insecure:   cfg.Insecure,
+		AuthToken:  cfg.AuthToken,
+		S3Endpoint: cfg.S3Endpoint,
+		S3Region:   cfg.S3Region,
+		StagingDir: "",
+	}
+	if cfg.ConfigDir != "" {
+		openOpts.StagingDir = filepath.Join(cfg.ConfigDir, "s3-staging")
+	}
+	src, err := factory.Open(ctx, srcEP, openOpts)
 	if err != nil {
 		return Stats{}, fmt.Errorf("source: %w", err)
 	}
 	defer func() { _ = src.Close() }()
-	dst, err := openTransport(ctx, dstEP, cfg.Insecure, cfg.AuthToken)
+	dst, err := factory.Open(ctx, dstEP, openOpts)
 	if err != nil {
 		return Stats{}, fmt.Errorf("dest: %w", err)
 	}
@@ -198,6 +208,9 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 	}
 	if workers > 32 {
 		workers = 32
+	}
+	if !dst.Caps().SupportsMultiplex && workers > 1 {
+		workers = 1
 	}
 	if rep != nil {
 		rep.JobStart(cfg.JobID, cfg.Source, cfg.Dest, mode, workers)
@@ -522,6 +535,11 @@ func tryTransfer(
 	for _, c := range plan.Missing {
 		missingSet[c.Digest] = struct{}{}
 	}
+	reuseByNew := make(map[uint64]delta.ReuseEntry, len(plan.Reuse))
+	for _, r := range plan.Reuse {
+		reuseByNew[r.NewOffset] = r
+	}
+	canReuse := dst.Caps().SupportsReuseChunk && len(destSig.Chunks) > 0
 
 	if cfg.DryRun {
 		var payload int64
@@ -531,7 +549,7 @@ func tryTransfer(
 		if payload == 0 && sig.Digest != destSig.Digest {
 			payload = sig.Size
 		}
-		return payload, 0, int64(plan.Reuse), int64(len(plan.Missing)), "ok", 0, 0, nil
+		return payload, 0, int64(len(plan.Reuse)), int64(len(plan.Missing)), "ok", 0, 0, nil
 	}
 
 	if journ != nil {
@@ -580,15 +598,24 @@ func tryTransfer(
 			payload += int64(len(data))
 			wireBytes += int64(len(enc))
 			chunksSent++
-		} else {
-			if err := limiter.Wait(ctx, len(data)); err != nil {
-				return 0, 0, 0, 0, "failed", 0, 0, err
-			}
-			if err := ws.WriteChunk(ctx, c.Offset, compress.CodecNone, len(data), data); err != nil {
-				return 0, 0, 0, 0, "failed", 0, 0, err
-			}
-			wireBytes += int64(len(data))
+			continue
 		}
+		re := reuseByNew[c.Offset]
+		if canReuse {
+			if err := ws.ReuseChunk(ctx, re.NewOffset, re.OldOffset, re.Digest, re.Length); err != nil {
+				return 0, 0, 0, 0, "failed", 0, 0, err
+			}
+			// Reused bytes do not count toward BytesWired / bandwidth limiter.
+			continue
+		}
+		// Legacy full-wire path when dest cannot reuse.
+		if err := limiter.Wait(ctx, len(data)); err != nil {
+			return 0, 0, 0, 0, "failed", 0, 0, err
+		}
+		if err := ws.WriteChunk(ctx, c.Offset, compress.CodecNone, len(data), data); err != nil {
+			return 0, 0, 0, 0, "failed", 0, 0, err
+		}
+		wireBytes += int64(len(data))
 	}
 
 	st, err = src.Stat(ctx, meta.RelPath)
@@ -635,7 +662,7 @@ func tryTransfer(
 	if wireBytes > 0 {
 		compRatio = float64(payload) / float64(wireBytes)
 	}
-	return payload, wireBytes, int64(plan.Reuse), chunksSent, "ok", 0, compRatio, nil
+	return payload, wireBytes, int64(len(plan.Reuse)), chunksSent, "ok", 0, compRatio, nil
 }
 
 func stripData(in []chunk.Chunk) []chunk.Chunk {
@@ -694,21 +721,6 @@ func destDigestMatches(ctx context.Context, dst transport.Transport, rel, want s
 	return got.String() == want, nil
 }
 
-func openTransport(ctx context.Context, ep transport.Endpoint, insecure bool, authToken string) (transport.Transport, error) {
-	switch ep.Scheme {
-	case "file":
-		return local.New(ep.Path)
-	case "ssh":
-		return sshxfer.New(ctx, ep)
-	case "quiksync":
-		return daemon.DialOpts(ctx, ep, daemon.DialOptions{Insecure: insecure, AuthToken: authToken})
-	case "s3":
-		return nil, fmt.Errorf("s3 transport reserved for a later release")
-	default:
-		return nil, fmt.Errorf("unsupported endpoint scheme %q", ep.Scheme)
-	}
-}
-
 func max(a, b int) int {
 	if a > b {
 		return a
@@ -718,6 +730,11 @@ func max(a, b int) int {
 
 // Verify compares digests of regular files.
 func Verify(ctx context.Context, source, dest string) ([]string, error) {
+	return VerifyWith(ctx, source, dest, transport.OpenOptions{})
+}
+
+// VerifyWith is Verify with transport open options (S3 endpoint/region, QUIC auth, …).
+func VerifyWith(ctx context.Context, source, dest string, opts transport.OpenOptions) ([]string, error) {
 	srcEP, err := transport.ParseEndpoint(source)
 	if err != nil {
 		return nil, err
@@ -726,12 +743,12 @@ func Verify(ctx context.Context, source, dest string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	src, err := openTransport(ctx, srcEP, false, "")
+	src, err := factory.Open(ctx, srcEP, opts)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = src.Close() }()
-	dst, err := openTransport(ctx, dstEP, false, "")
+	dst, err := factory.Open(ctx, dstEP, opts)
 	if err != nil {
 		return nil, err
 	}

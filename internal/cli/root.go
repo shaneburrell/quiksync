@@ -45,6 +45,9 @@ live-change detection, and runtime autotuning of streams, frame sizes, and compr
 	root.AddCommand(newVerifyCmd())
 	root.AddCommand(newServeCmd())
 	root.AddCommand(newRemoteHelperCmd())
+	root.AddCommand(newSendCmd())
+	root.AddCommand(newRecvCmd())
+	root.AddCommand(newRelayCmd())
 	return root
 }
 
@@ -67,4 +70,6 @@ func commonTransferFlags(cmd *cobra.Command, opts *TransferFlags) {
 	cmd.Flags().StringVar(&opts.JobID, "job-id", "default", "journal/job id for resume isolation")
 	cmd.Flags().StringVar(&opts.LogFile, "log-file", "", "job event log path (default: DEST/.quiksync/logs/<job>.log)")
 	cmd.Flags().BoolVar(&opts.NoLog, "no-log", false, "disable tailable job event logging")
+	cmd.Flags().StringVar(&opts.S3Endpoint, "s3-endpoint", "", "S3-compatible endpoint URL (MinIO/R2)")
+	cmd.Flags().StringVar(&opts.S3Region, "s3-region", "", "S3 region (or AWS_REGION)")
 }

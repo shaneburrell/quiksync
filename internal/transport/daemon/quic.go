@@ -140,7 +140,7 @@ func DialOpts(ctx context.Context, ep transport.Endpoint, opts DialOptions) (*Cl
 	c := &Client{ep: ep, conn: conn, stream: stream}
 	// Server --root is authoritative; send empty Root + auth token.
 	if err := protocol.WriteJSON(c.stream, protocol.MsgHello, protocol.Hello{
-		Version: "1", Root: "", AuthToken: opts.AuthToken,
+		Version: protocol.ProtocolVersion, Root: "", AuthToken: opts.AuthToken,
 	}); err != nil {
 		_ = c.Close()
 		return nil, err
@@ -158,7 +158,31 @@ func DialOpts(ctx context.Context, ep transport.Endpoint, opts DialOptions) (*Cl
 		_ = c.Close()
 		return nil, fmt.Errorf("quic hello failed: type=%d", typ)
 	}
+	var ok protocol.HelloOK
+	if err := protocol.DecodeJSON(payload, &ok); err != nil {
+		_ = c.Close()
+		return nil, err
+	}
+	if err := protocol.CheckPeerVersion(ok.Version); err != nil {
+		_ = c.Close()
+		return nil, err
+	}
+	c.caps = mapHelloCaps(ok)
+	// Client currently serializes all RPCs on one stream.
+	c.caps.SupportsMultiplex = false
 	return c, nil
+}
+
+func mapHelloCaps(ok protocol.HelloOK) transport.Caps {
+	if ok.Version == "" || ok.Version == "1" {
+		return transport.Caps{SupportsDelta: true, SupportsMultiplex: false, SupportsResume: true}
+	}
+	return transport.Caps{
+		SupportsDelta:      ok.Caps.SupportsDelta,
+		SupportsMultiplex:  ok.Caps.SupportsMultiplex,
+		SupportsResume:     ok.Caps.SupportsResume,
+		SupportsReuseChunk: ok.Caps.SupportsReuseChunk,
+	}
 }
 
 // Client is a QUIC-backed transport.
@@ -167,11 +191,10 @@ type Client struct {
 	conn   *quic.Conn
 	stream *quic.Stream
 	mu     sync.Mutex // serializes framed RPC on the shared stream
+	caps   transport.Caps
 }
 
-func (c *Client) Caps() transport.Caps {
-	return transport.Caps{SupportsDelta: true, SupportsMultiplex: true, SupportsResume: true}
-}
+func (c *Client) Caps() transport.Caps { return c.caps }
 
 func (c *Client) Close() error {
 	c.mu.Lock()
@@ -368,6 +391,54 @@ func (w *clientWrite) WriteChunk(ctx context.Context, offset uint64, codec compr
 		return err
 	}
 	return expectOK(w.c.stream)
+}
+
+func (w *clientWrite) ReuseChunk(ctx context.Context, newOffset, oldOffset uint64, digest chunk.Digest, length int) error {
+	if w.committed {
+		return fmt.Errorf("reuse after commit")
+	}
+	if !w.c.caps.SupportsReuseChunk {
+		return fmt.Errorf("remote does not support reuse chunk; upgrade quiksync on the remote host")
+	}
+	if err := protocol.WriteJSON(w.c.stream, protocol.MsgReuseChunk, protocol.ReuseChunkReq{
+		NewOffset: newOffset, OldOffset: oldOffset, Digest: digest, Length: length,
+	}); err != nil {
+		return err
+	}
+	return expectOK(w.c.stream)
+}
+
+// RelayNotify sends a wakeup-only mid-hop notify.
+func (c *Client) RelayNotify(ctx context.Context, meta protocol.RelayNotifyMeta) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_ = ctx
+	if err := protocol.WriteJSON(c.stream, protocol.MsgRelayNotify, meta); err != nil {
+		return err
+	}
+	return expectOK(c.stream)
+}
+
+// RelayWait asks the peer to acknowledge a wait.
+func (c *Client) RelayWait(ctx context.Context, meta protocol.RelayNotifyMeta) (protocol.RelayNotifyMeta, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_ = ctx
+	if err := protocol.WriteJSON(c.stream, protocol.MsgRelayWait, meta); err != nil {
+		return protocol.RelayNotifyMeta{}, err
+	}
+	typ, payload, err := protocol.ReadMsg(c.stream)
+	if err != nil {
+		return protocol.RelayNotifyMeta{}, err
+	}
+	if typ != protocol.MsgRelayWaitOK {
+		return protocol.RelayNotifyMeta{}, remoteErr(typ, payload)
+	}
+	var out protocol.RelayNotifyMeta
+	if err := protocol.DecodeJSON(payload, &out); err != nil {
+		return protocol.RelayNotifyMeta{}, err
+	}
+	return out, nil
 }
 
 func (w *clientWrite) Commit(ctx context.Context, expected chunk.Digest, mode os.FileMode, modTime time.Time) error {

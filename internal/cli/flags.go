@@ -23,4 +23,6 @@ type TransferFlags struct {
 	JobID           string
 	LogFile         string
 	NoLog           bool
+	S3Endpoint      string
+	S3Region        string
 }

@@ -32,6 +32,9 @@ func TestQUICRoundTrip(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	defer func() { _ = client.Close() }()
+	if client.Caps().SupportsMultiplex {
+		t.Fatal("QUIC client should report SupportsMultiplex=false until multi-stream RPC exists")
+	}
 
 	files, err := client.Walk(ctx2, nil)
 	if err != nil {

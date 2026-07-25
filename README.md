@@ -12,6 +12,7 @@ QuikSync copies and syncs files **intact and verifiably** from source → destin
 quiksync copy ./photos /backup/photos
 quiksync sync ./project user@host:/srv/project --delete
 quiksync copy ./data quiksync://nas:4242/volume/data
+quiksync copy ./data s3://bucket/prefix
 ```
 
 ## Why QuikSync?
@@ -22,8 +23,8 @@ quiksync copy ./data quiksync://nas:4242/volume/data
 | Interrupted multi-GB jobs | JSONL journal resume under `.quiksync/` |
 | Files changing while copying | Detect mutation, requeue (or `--skip-unstable`) |
 | Slow / high-RTT / lossy links | Autotune streams, window, compression |
-| Re-copying almost-identical trees | FastCDC deltas plan missing chunks (reused chunks still written locally today) |
-| Mixed environments | Local, SSH, and QUIC daemon transports |
+| Re-copying almost-identical trees | FastCDC sparse delta: reused chunks assembled at dest (not re-wired) |
+| Mixed environments | Local, SSH, QUIC, S3, NFS mount / experimental `nfs://` |
 
 ## Install
 
@@ -122,6 +123,49 @@ quiksync copy ./src quiksync://server.example:4242/ --auth-token "$QUIKSYNC_AUTH
 
 Remote destinations store resume journal/index under `$QUIKSYNC_CONFIG/jobs/<job-id>/` (default job id `default`; override with `--job-id`). `--exclude` patterns also protect matching destination paths from `--delete`.
 
+### S3-compatible object storage
+
+```bash
+# Default AWS credential chain; optional endpoint for MinIO/R2
+export AWS_REGION=us-east-1
+quiksync copy ./src s3://my-bucket/backup/prefix
+quiksync copy ./src s3://my-bucket/prefix --s3-endpoint http://127.0.0.1:9000 --s3-region us-east-1
+quiksync verify ./src s3://my-bucket/prefix --s3-endpoint http://127.0.0.1:9000 --s3-region us-east-1
+```
+
+Sparse delta uses client-adjacent assemble (ranged GET of reused bytes from the existing object). Scope IAM to the bucket/prefix; `--delete` removes objects. `--s3-endpoint` / `--s3-region` are also on `send`, `recv`, and `relay gc`.
+
+### NFS
+
+Preferred: mount the share and use a normal path (`quiksync copy ./src /mnt/nfs/backup`). Local transport detects NFS mounts and stages beside the destination for same-directory rename.
+
+Experimental native client (NFSv3 + AUTH_SYS only; trusted networks):
+
+```bash
+# Mounts export /export; uses subdirectory backup/ inside it
+quiksync copy ./src nfs://nas/export/backup
+```
+
+`nfs://host/export[/subdir…]` tries the longest matching server export, then treats the remainder as a working subdirectory. Writes stage under `.quiksync.tmp/` and promote with NFSv3 `RENAME` (prior destination is preserved until rename succeeds). Mode/mtime are not preserved yet. Custom URI ports are not supported (the client uses portmapper on the host).
+
+### Mid-hop relay (cloud / shared store as midpoint)
+
+When peers cannot open a direct data path, publish content-addressed chunks to a mid store and receive on the other side. Store signaling (poll) always works; optional `--signal quiksync://…` / SSH is wakeup-only (unblocks a waiting peer daemon; the receiver still re-reads and verifies the mid store). Job IDs are sanitized (alphanumeric, `-_.`, no path separators); use one sender per job id.
+
+```bash
+# Receiver: run a daemon, then recv with --signal pointing at that daemon
+quiksync serve --root /var/empty --auth-token "$TOKEN" &
+quiksync recv --via s3://bucket/mid/jobs/abc ./dst \
+  --s3-endpoint http://127.0.0.1:9000 --signal quiksync://127.0.0.1:4242
+
+# Sender (notify wakes the receiver's daemon)
+quiksync send ./src --via s3://bucket/mid/jobs/abc \
+  --s3-endpoint http://127.0.0.1:9000 --signal quiksync://peer:4242 --job-id abc
+
+# Cleanup after ack (or --force / TTL expiry)
+quiksync relay gc --via s3://bucket/mid/jobs/abc --job-id abc --s3-endpoint http://127.0.0.1:9000
+```
+
 ## Autotuning
 
 `--auto` is **on by default**. QuikSync probes the path and content, then hill-climbs:
@@ -162,7 +206,7 @@ Source ──► Walk / plan ──► FastCDC + BLAKE3 ──► Delta vs dest 
                                               │
                      Autotuner ◄──────────────┤ streams / compress / frames
                                               ▼
-                         Multiplexed transfer (local / SSH / QUIC)
+              Missing chunks on the wire; reused chunks assembled at dest
                                               │
                          Temp write → whole-file verify → atomic rename
                                               │
@@ -189,8 +233,10 @@ internal/compress/      none / lz4 / zstd
 internal/journal/       Crash-safe resume (JSONL)
 internal/index/         Dest signature cache
 internal/progress/      Tailable job event log + progress ticker
-internal/transport/     file · ssh · quiksync (QUIC)
+internal/transport/     file · ssh · quiksync · s3 · nfs
+internal/transport/factory/  Open() switch
 internal/protocol/      Framed RPC for remote helper / daemon
+internal/relay/         Mid-hop send/recv + store signal
 ```
 
 ## Development
@@ -249,11 +295,13 @@ git push origin v0.1.0
 
 **v0.1** — local + SSH + QUIC daemon, autotune, resume, live-change handling.
 
+**Current** — sparse delta (`ReuseChunk`), S3 transport, NFS mount hardening + experimental `nfs://`, mid-hop `send`/`recv` with store + optional QuikSync signaling.
+
 Later:
 
-- S3-compatible object storage (`s3://…`) behind the same transport interface
 - Host profile tooling / richer TUI (event log + stderr progress ticker shipped in v0.1)
 - Optional `quiksync watch` for continuous one-way follow
+- Client-side encryption for mid-hop objects
 
 ## License
 

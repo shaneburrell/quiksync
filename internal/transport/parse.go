@@ -64,6 +64,17 @@ func ParseEndpoint(s string) (Endpoint, error) {
 			return Endpoint{Scheme: "quiksync", Host: u.Hostname(), Port: port, Path: path, Raw: s}, nil
 		case "s3":
 			return Endpoint{Scheme: "s3", Host: u.Host, Path: strings.TrimPrefix(u.Path, "/"), Raw: s}, nil
+		case "nfs":
+			// nfs://host[:port]/export/path — Host is server; Path is /export/rest
+			path := u.Path
+			if path == "" {
+				path = "/"
+			}
+			port := u.Port()
+			if port == "" {
+				port = "2049"
+			}
+			return Endpoint{Scheme: "nfs", Host: u.Hostname(), Port: port, Path: path, Raw: s}, nil
 		default:
 			return Endpoint{}, fmt.Errorf("unsupported scheme %q", u.Scheme)
 		}

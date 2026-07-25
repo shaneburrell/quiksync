@@ -2,23 +2,44 @@ package delta
 
 import "github.com/shaneburrell/quiksync/internal/chunk"
 
-// Plan describes which source chunks are missing at the destination.
-type Plan struct {
-	Missing []chunk.Chunk
-	Reuse   int
+// ReuseEntry maps a source chunk onto bytes already present at the destination.
+type ReuseEntry struct {
+	NewOffset uint64
+	OldOffset uint64
+	Digest    chunk.Digest
+	Length    int
 }
 
-// Diff returns chunks from src that are not present in dest signature.
+// Plan describes which source chunks are missing vs reusable at the destination.
+type Plan struct {
+	Missing []chunk.Chunk
+	Reuse   []ReuseEntry
+}
+
+// Diff returns chunks from src that are not present in dest signature,
+// and reuse entries with dest oldOffset for digests that are present.
 func Diff(src, dest chunk.FileSignature) Plan {
-	have := make(map[chunk.Digest]struct{}, len(dest.Chunks))
+	type loc struct {
+		offset uint64
+		length uint32
+	}
+	have := make(map[chunk.Digest]loc, len(dest.Chunks))
 	for _, c := range dest.Chunks {
-		have[c.Digest] = struct{}{}
+		if _, ok := have[c.Digest]; ok {
+			continue // first occurrence wins
+		}
+		have[c.Digest] = loc{offset: c.Offset, length: c.Length}
 	}
 	var missing []chunk.Chunk
-	reuse := 0
+	var reuse []ReuseEntry
 	for _, c := range src.Chunks {
-		if _, ok := have[c.Digest]; ok {
-			reuse++
+		if loc, ok := have[c.Digest]; ok && loc.length == c.Length {
+			reuse = append(reuse, ReuseEntry{
+				NewOffset: c.Offset,
+				OldOffset: loc.offset,
+				Digest:    c.Digest,
+				Length:    int(c.Length),
+			})
 			continue
 		}
 		missing = append(missing, c)

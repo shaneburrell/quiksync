@@ -40,3 +40,14 @@ func TestWriteJSON(t *testing.T) {
 		t.Fatalf("root %q", h.Root)
 	}
 }
+
+func TestCheckPeerVersion(t *testing.T) {
+	for _, v := range []string{"", "1", ProtocolVersion} {
+		if err := CheckPeerVersion(v); err != nil {
+			t.Fatalf("version %q: %v", v, err)
+		}
+	}
+	if err := CheckPeerVersion("99"); err == nil {
+		t.Fatal("expected reject unknown version")
+	}
+}

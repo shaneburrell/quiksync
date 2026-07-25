@@ -22,8 +22,11 @@ func TestDiffReuse(t *testing.T) {
 		},
 	}
 	p := Diff(src, dest)
-	if p.Reuse != 1 || len(p.Missing) != 1 {
-		t.Fatalf("reuse=%d missing=%d", p.Reuse, len(p.Missing))
+	if len(p.Reuse) != 1 || len(p.Missing) != 1 {
+		t.Fatalf("reuse=%d missing=%d", len(p.Reuse), len(p.Missing))
+	}
+	if p.Reuse[0].OldOffset != 0 || p.Reuse[0].NewOffset != 0 {
+		t.Fatalf("reuse offsets: %+v", p.Reuse[0])
 	}
 }
 

@@ -17,6 +17,7 @@ func TestParseEndpoints(t *testing.T) {
 		{"ssh://user@host:22/data", "ssh", "/data", "host"},
 		{"quiksync://host:4242/data", "quiksync", "/data", "host"},
 		{"s3://bucket/prefix", "s3", "prefix", "bucket"},
+		{"nfs://nas/export/data", "nfs", "/export/data", "nas"},
 	}
 	for _, tc := range cases {
 		ep, err := ParseEndpoint(tc.in)

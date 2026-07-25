@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/shaneburrell/quiksync/internal/engine"
+	"github.com/shaneburrell/quiksync/internal/transport"
 	"github.com/spf13/cobra"
 )
 
@@ -71,12 +72,23 @@ func newSyncCmd() *cobra.Command {
 }
 
 func newVerifyCmd() *cobra.Command {
+	var s3Endpoint, s3Region, authToken string
+	var insecure bool
 	cmd := &cobra.Command{
 		Use:   "verify SRC DEST",
 		Short: "Compare source and destination digests",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			mismatches, err := engine.Verify(context.Background(), args[0], args[1])
+			if authToken == "" {
+				authToken = os.Getenv("QUIKSYNC_AUTH_TOKEN")
+			}
+			opts := transport.OpenOptions{
+				Insecure:   insecure,
+				AuthToken:  authToken,
+				S3Endpoint: s3Endpoint,
+				S3Region:   s3Region,
+			}
+			mismatches, err := engine.VerifyWith(context.Background(), args[0], args[1], opts)
 			if err != nil {
 				return err
 			}
@@ -90,5 +102,9 @@ func newVerifyCmd() *cobra.Command {
 			return fmt.Errorf("%d mismatch(es)", len(mismatches))
 		},
 	}
+	cmd.Flags().StringVar(&s3Endpoint, "s3-endpoint", "", "S3-compatible endpoint URL (MinIO/R2)")
+	cmd.Flags().StringVar(&s3Region, "s3-region", "", "S3 region (or AWS_REGION)")
+	cmd.Flags().BoolVar(&insecure, "insecure", false, "skip QUIC TOFU certificate pinning (labs only)")
+	cmd.Flags().StringVar(&authToken, "auth-token", "", "QUIC daemon auth token (or QUIKSYNC_AUTH_TOKEN)")
 	return cmd
 }

@@ -18,6 +18,7 @@ import (
 
 type Transport struct {
 	root string
+	nfs  bool
 }
 
 func New(root string) (*Transport, error) {
@@ -28,12 +29,20 @@ func New(root string) (*Transport, error) {
 	if err := os.MkdirAll(abs, 0o755); err != nil {
 		return nil, err
 	}
-	return &Transport{root: abs}, nil
+	return &Transport{root: abs, nfs: isNFS(abs)}, nil
 }
 
 func (t *Transport) Caps() transport.Caps {
-	return transport.Caps{SupportsDelta: true, SupportsMultiplex: true, SupportsResume: true}
+	return transport.Caps{
+		SupportsDelta:      true,
+		SupportsMultiplex:  true,
+		SupportsResume:     true,
+		SupportsReuseChunk: true,
+	}
 }
+
+// OnNFS reports whether the root appears to be an NFS mount.
+func (t *Transport) OnNFS() bool { return t.nfs }
 
 func (t *Transport) Close() error { return nil }
 
@@ -125,8 +134,12 @@ type writeSession struct {
 	destAbs   string
 	tempAbs   string
 	f         *os.File
+	old       *os.File
+	oldSize   int64
+	oldModNano int64
 	size      int64
 	committed bool
+	nfs       bool
 }
 
 func partialTempName(rel string) string {
@@ -139,14 +152,18 @@ func (t *Transport) BeginWrite(ctx context.Context, rel string, size int64) (tra
 	if err != nil {
 		return nil, err
 	}
-	tmpDir := filepath.Join(t.root, ".quiksync.tmp")
+	// Prefer staging beside dest for same-directory rename (important on NFS).
+	tmpDir := filepath.Join(filepath.Dir(dest), ".quiksync.tmp")
 	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
-		return nil, err
+		// Fall back to root staging dir.
+		tmpDir = filepath.Join(t.root, ".quiksync.tmp")
+		if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+			return nil, err
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return nil, err
 	}
-	// Flat hashed name only — never mirror rel under tmp (symlink escape risk).
 	tmp := filepath.Join(tmpDir, partialTempName(rel))
 	if err := prepareStagingFile(tmp); err != nil {
 		return nil, err
@@ -162,7 +179,16 @@ func (t *Transport) BeginWrite(ctx context.Context, rel string, size int64) (tra
 			return nil, err
 		}
 	}
-	return &writeSession{destAbs: dest, tempAbs: tmp, f: f, size: size}, nil
+	ws := &writeSession{destAbs: dest, tempAbs: tmp, f: f, size: size, nfs: t.nfs}
+	if st, err := os.Stat(dest); err == nil && st.Mode().IsRegular() {
+		old, err := os.Open(dest)
+		if err == nil {
+			ws.old = old
+			ws.oldSize = st.Size()
+			ws.oldModNano = st.ModTime().UnixNano()
+		}
+	}
+	return ws, nil
 }
 
 // prepareStagingFile removes any existing path at tmp so OpenFile O_EXCL can
@@ -204,6 +230,47 @@ func (w *writeSession) WriteChunk(ctx context.Context, offset uint64, codec comp
 	return nil
 }
 
+func (w *writeSession) ReuseChunk(ctx context.Context, newOffset, oldOffset uint64, digest chunk.Digest, length int) error {
+	if w.committed {
+		return fmt.Errorf("reuse after commit")
+	}
+	if w.old == nil {
+		return fmt.Errorf("reuse chunk: no existing destination file")
+	}
+	if err := w.checkOldUnchanged(); err != nil {
+		return err
+	}
+	if length < 0 {
+		return fmt.Errorf("reuse chunk: negative length")
+	}
+	buf := make([]byte, length)
+	n, err := w.old.ReadAt(buf, int64(oldOffset))
+	if err != nil && err != io.EOF {
+		return fmt.Errorf("reuse read: %w", err)
+	}
+	if n != length {
+		return fmt.Errorf("reuse read: short read %d want %d", n, length)
+	}
+	if got := chunk.Sum(buf); got != digest {
+		return fmt.Errorf("reuse digest mismatch at old_offset=%d", oldOffset)
+	}
+	if _, err := w.f.WriteAt(buf, int64(newOffset)); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (w *writeSession) checkOldUnchanged() error {
+	st, err := os.Stat(w.destAbs)
+	if err != nil {
+		return fmt.Errorf("reuse TOCTOU: dest changed: %w", err)
+	}
+	if st.Size() != w.oldSize || st.ModTime().UnixNano() != w.oldModNano {
+		return fmt.Errorf("reuse TOCTOU: dest size/mtime changed during write")
+	}
+	return nil
+}
+
 func (w *writeSession) Commit(ctx context.Context, expected chunk.Digest, mode os.FileMode, modTime time.Time) error {
 	if w.committed {
 		return nil
@@ -225,6 +292,10 @@ func (w *writeSession) Commit(ctx context.Context, expected chunk.Digest, mode o
 		return err
 	}
 	w.f = nil
+	if w.old != nil {
+		_ = w.old.Close()
+		w.old = nil
+	}
 	if mode != 0 {
 		if err := os.Chmod(w.tempAbs, mode.Perm()); err != nil {
 			return fmt.Errorf("chmod: %w", err)
@@ -239,7 +310,6 @@ func (w *writeSession) Commit(ctx context.Context, expected chunk.Digest, mode o
 		return err
 	}
 	w.committed = true
-	// Best-effort fsync of parent directory.
 	if dir, err := os.Open(filepath.Dir(w.destAbs)); err == nil {
 		_ = dir.Sync()
 		_ = dir.Close()
@@ -254,6 +324,10 @@ func (w *writeSession) Abort() error {
 	if w.f != nil {
 		_ = w.f.Close()
 		w.f = nil
+	}
+	if w.old != nil {
+		_ = w.old.Close()
+		w.old = nil
 	}
 	err := os.Remove(w.tempAbs)
 	if os.IsNotExist(err) {

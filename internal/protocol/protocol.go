@@ -36,7 +36,23 @@ const (
 	MsgTuneOffer
 	MsgTuneApply
 	MsgBye
+	MsgReuseChunk
+	MsgRelayNotify
+	MsgRelayWait
+	MsgRelayWaitOK
 )
+
+// ProtocolVersion is advertised in Hello / HelloOK.
+const ProtocolVersion = "2"
+
+// CheckPeerVersion accepts legacy v1 (empty/"1") and the current version.
+// Unknown future versions are rejected rather than silently disabling caps.
+func CheckPeerVersion(v string) error {
+	if v == "" || v == "1" || v == ProtocolVersion {
+		return nil
+	}
+	return fmt.Errorf("unsupported protocol version %q", v)
+}
 
 type Header struct {
 	Type MsgType
@@ -94,6 +110,21 @@ type Hello struct {
 	AuthToken string `json:"auth_token,omitempty"`
 }
 
+// Caps is negotiated in HelloOK (mirrors transport.Caps JSON).
+type Caps struct {
+	SupportsDelta      bool `json:"supports_delta"`
+	SupportsMultiplex  bool `json:"supports_multiplex"`
+	SupportsResume     bool `json:"supports_resume"`
+	SupportsReuseChunk bool `json:"supports_reuse_chunk"`
+}
+
+// HelloOK is the server greeting including capability bits.
+type HelloOK struct {
+	Version string `json:"version"`
+	Root    string `json:"root,omitempty"`
+	Caps    Caps   `json:"caps"`
+}
+
 type FileMeta struct {
 	RelPath string `json:"rel_path"`
 	Size    int64  `json:"size"`
@@ -123,6 +154,13 @@ type WriteChunkReq struct {
 	Codec           compress.Codec `json:"codec"`
 	UncompressedLen int            `json:"uncompressed_len"`
 	Data            []byte         `json:"data"`
+}
+
+type ReuseChunkReq struct {
+	NewOffset uint64       `json:"new_offset"`
+	OldOffset uint64       `json:"old_offset"`
+	Digest    chunk.Digest `json:"digest"`
+	Length    int          `json:"length"`
 }
 
 type CommitReq struct {
@@ -164,4 +202,21 @@ type TuneProfile struct {
 
 type OK struct {
 	OK bool `json:"ok"`
+}
+
+// RelayNotifyMeta is a wakeup-only control message for mid-hop jobs.
+type RelayNotifyMeta struct {
+	JobID      string `json:"job_id"`
+	Via        string `json:"via,omitempty"`
+	Generation int64  `json:"generation,omitempty"`
+}
+
+// DefaultCaps are advertised by local-backed remote helpers.
+func DefaultCaps() Caps {
+	return Caps{
+		SupportsDelta:      true,
+		SupportsMultiplex:  true,
+		SupportsResume:     true,
+		SupportsReuseChunk: true,
+	}
 }

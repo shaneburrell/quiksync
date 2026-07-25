@@ -80,6 +80,8 @@ func buildConfig(src, dest string, f TransferFlags, syncMode bool) (engine.Confi
 		AuthToken:       authToken,
 		JobID:           jobID,
 		ConfigDir:       cfgDir,
+		S3Endpoint:      f.S3Endpoint,
+		S3Region:        f.S3Region,
 		Tune: autotune.Config{
 			Enabled:     f.Auto,
 			Streams:     streams,
