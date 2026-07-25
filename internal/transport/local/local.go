@@ -131,15 +131,15 @@ func (t *Transport) GetSignature(ctx context.Context, rel string) (chunk.FileSig
 }
 
 type writeSession struct {
-	destAbs   string
-	tempAbs   string
-	f         *os.File
-	old       *os.File
-	oldSize   int64
+	destAbs    string
+	tempAbs    string
+	f          *os.File
+	old        *os.File
+	oldSize    int64
 	oldModNano int64
-	size      int64
-	committed bool
-	nfs       bool
+	size       int64
+	committed  bool
+	nfs        bool
 }
 
 func partialTempName(rel string) string {

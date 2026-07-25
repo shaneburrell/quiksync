@@ -53,10 +53,7 @@ func (t *Transport) rename(fromRel, toRel string) error {
 	if err != nil {
 		return err
 	}
-	if err := gonfs.NFS3Error(status); err != nil {
-		return err
-	}
-	return nil
+	return gonfs.NFS3Error(status)
 }
 
 func splitNFSPath(p string) (dir, name string) {

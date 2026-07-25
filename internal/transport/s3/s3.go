@@ -75,7 +75,7 @@ func New(ctx context.Context, ep transport.Endpoint, opts Options) (*Transport, 
 	if err := os.MkdirAll(staging, 0o755); err != nil {
 		return nil, err
 	}
-	var client API = opts.Client
+	client := opts.Client
 	if client == nil {
 		loadOpts := []func(*config.LoadOptions) error{}
 		if opts.Region != "" {
@@ -132,15 +132,6 @@ func (t *Transport) key(rel string) string {
 		return t.prefix
 	}
 	return t.prefix + "/" + rel
-}
-
-func (t *Transport) tmpKey(rel string) string {
-	sum := sha256.Sum256([]byte(filepath.ToSlash(rel)))
-	name := hex.EncodeToString(sum[:8])
-	if t.prefix == "" {
-		return ".quiksync.tmp/" + name
-	}
-	return t.prefix + "/.quiksync.tmp/" + name
 }
 
 func (t *Transport) sigKey(rel string) string {
