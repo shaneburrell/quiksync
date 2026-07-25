@@ -28,8 +28,17 @@ func TestParseSize(t *testing.T) {
 	if _, err := parseSize("nope"); err == nil {
 		t.Fatal("expected error")
 	}
+	if _, err := parseSize(""); err == nil {
+		t.Fatal("expected empty rejection")
+	}
 	if _, err := parseSize("-1K"); err == nil {
 		t.Fatal("expected negative rejection")
+	}
+	if got, err := parseSize("1GiB"); err != nil || got != 1024*1024*1024 {
+		t.Fatalf("GiB: %d %v", got, err)
+	}
+	if got, err := parseSize("1GB"); err != nil || got != 1024*1024*1024 {
+		t.Fatalf("GB: %d %v", got, err)
 	}
 	if _, err := buildConfig("/s", "/d", TransferFlags{Compress: "none", ChunkSize: "1K"}, false); err == nil {
 		t.Fatal("expected chunk-size too small")

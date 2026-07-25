@@ -34,8 +34,8 @@ jobs:
           go tool cover -func=testdata/artifacts/coverage.out | tee testdata/artifacts/coverage.txt
           total=$(go tool cover -func=testdata/artifacts/coverage.out | awk '/^total:/{print $3}' | tr -d '%')
           echo "total coverage: ${total}%"
-          # 69.5% floor: experimental NFS is excluded; allow tiny linux/darwin variance.
-          awk -v t="$total" 'BEGIN{ if (t+0 < 69.5) { printf("coverage %.1f%% is below 69.5%% gate\n", t); exit 1 } }'
+          # 80.0% floor: experimental NFS is excluded; allow tiny linux/darwin variance.
+          awk -v t="$total" 'BEGIN{ if (t+0 < 80.0) { printf("coverage %.1f%% is below 80.0%% gate\n", t); exit 1 } }'
       - name: Short benchmarks
         run: go test -bench=. -benchtime=200ms -count=1 ./internal/chunk/ ./internal/compress/ ./internal/engine/
       - name: Fuzz smoke
