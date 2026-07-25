@@ -51,3 +51,10 @@ func TestCheckPeerVersion(t *testing.T) {
 		t.Fatal("expected reject unknown version")
 	}
 }
+
+func TestDefaultCaps(t *testing.T) {
+	c := DefaultCaps()
+	if !c.SupportsDelta || !c.SupportsMultiplex || !c.SupportsResume || !c.SupportsReuseChunk {
+		t.Fatalf("%+v", c)
+	}
+}

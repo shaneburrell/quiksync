@@ -72,6 +72,50 @@ func TestLocalRoundTrip(t *testing.T) {
 	}
 }
 
+func TestLocalReuseChunk(t *testing.T) {
+	root := t.TempDir()
+	tr, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tr.Close() }()
+	ctx := context.Background()
+
+	base := []byte("reuse-base-0123456789")
+	ws, err := tr.BeginWrite(ctx, "r.bin", int64(len(base)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ws.WriteChunk(ctx, 0, compress.CodecNone, len(base), base); err != nil {
+		t.Fatal(err)
+	}
+	dig := chunk.Sum(base)
+	if err := ws.Commit(ctx, dig, 0o644, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	_ = tr.OnNFS()
+
+	next := append(append([]byte{}, base...), []byte("-MORE")...)
+	ws2, err := tr.BeginWrite(ctx, "r.bin", int64(len(next)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ws2.ReuseChunk(ctx, 0, 0, dig, len(base)); err != nil {
+		t.Fatal(err)
+	}
+	tail := []byte("-MORE")
+	if err := ws2.WriteChunk(ctx, uint64(len(base)), compress.CodecNone, len(tail), tail); err != nil {
+		t.Fatal(err)
+	}
+	if err := ws2.Commit(ctx, chunk.Sum(next), 0o600, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(root, "r.bin"))
+	if err != nil || string(got) != string(next) {
+		t.Fatalf("got %q err=%v", got, err)
+	}
+}
+
 func TestCommitDigestMismatchAborts(t *testing.T) {
 	tr, err := New(t.TempDir())
 	if err != nil {

@@ -73,6 +73,36 @@ func TestCLIInvalidCompress(t *testing.T) {
 	}
 }
 
+func TestCLISendRecvLocal(t *testing.T) {
+	src, mid, dst := t.TempDir(), t.TempDir(), t.TempDir()
+	mustWrite(t, filepath.Join(src, "hello.txt"), "relay-cli")
+	if err := cli.ExecuteArgs([]string{
+		"send", src, "--via", mid, "--job-id", "cli1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cli.ExecuteArgs([]string{
+		"recv", "--via", mid, dst, "--job-id", "cli1", "--wait", "5s",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cli.ExecuteArgs([]string{"verify", src, dst}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cli.ExecuteArgs([]string{
+		"relay", "gc", "--via", mid, "--job-id", "cli1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCLISendRequiresVia(t *testing.T) {
+	err := cli.ExecuteArgs([]string{"send", t.TempDir()})
+	if err == nil {
+		t.Fatal("expected --via required")
+	}
+}
+
 func mustWrite(t *testing.T, path, data string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

@@ -28,7 +28,9 @@ jobs:
       - name: Coverage
         run: |
           mkdir -p testdata/artifacts
-          go test ./internal/... -coverprofile=testdata/artifacts/coverage.out -covermode=atomic
+          # Native NFS needs a live NFSv3 server; keep package tests but exclude it from the gate.
+          go test $(go list ./internal/... | grep -vE '/transport/nfs$') \
+            -coverprofile=testdata/artifacts/coverage.out -covermode=atomic
           go tool cover -func=testdata/artifacts/coverage.out | tee testdata/artifacts/coverage.txt
           total=$(go tool cover -func=testdata/artifacts/coverage.out | awk '/^total:/{print $3}' | tr -d '%')
           echo "total coverage: ${total}%"

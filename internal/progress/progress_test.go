@@ -32,8 +32,14 @@ func TestOpenWritesLatestAndEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.JobStart("default", "/src", "/dst", "copy", 2)
+	r.Probe(2, "lz4", 1024, 8192)
 	r.FileOK("a.txt", 100, 50, 0, 1, 40*time.Millisecond)
+	r.FileSkip("skip.txt")
+	r.FileFail("bad.txt", os.ErrPermission, 2)
 	r.Progress(1, 10, 1, 0, 0, 100, 1000)
+	r.Delete("gone.txt")
+	r.DeleteSummary(1)
+	r.Warn("slow path", Str("path", "x"))
 	r.JobEnd(true, 1, 0, 0, 0, 100, time.Second)
 	if err := r.Close(); err != nil {
 		t.Fatal(err)
@@ -45,7 +51,11 @@ func TestOpenWritesLatestAndEvents(t *testing.T) {
 			t.Fatal(err)
 		}
 		s := string(b)
-		for _, want := range []string{"event=job_start", "event=file_ok", "event=progress", "event=job_end", `path=a.txt`} {
+		for _, want := range []string{
+			"event=job_start", "event=probe", "event=file_ok", "event=file_skip",
+			"event=file_fail", "event=progress", "event=delete", "event=delete_done",
+			"event=warn", "event=job_end", `path=a.txt`,
+		} {
 			if !strings.Contains(s, want) {
 				t.Fatalf("%s missing %q in:\n%s", p, want, s)
 			}
