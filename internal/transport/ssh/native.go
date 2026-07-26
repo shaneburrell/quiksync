@@ -30,6 +30,14 @@ func useNativeSSH() bool {
 	return false
 }
 
+func sshInsecureHostKey() bool {
+	switch os.Getenv("QUIKSYNC_SSH_INSECURE") {
+	case "1", "true", "yes":
+		return true
+	}
+	return false
+}
+
 func dialNative(ep transport.Endpoint) (*cryptossh.Client, *cryptossh.Session, error) {
 	user := ep.User
 	if user == "" {
@@ -95,14 +103,25 @@ func nativeAuthMethods() ([]cryptossh.AuthMethod, error) {
 }
 
 func nativeHostKeyCallback() (cryptossh.HostKeyCallback, error) {
+	if sshInsecureHostKey() {
+		return cryptossh.InsecureIgnoreHostKey(), nil //nolint:gosec // explicit QUIKSYNC_SSH_INSECURE
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return cryptossh.InsecureIgnoreHostKey(), nil //nolint:gosec // fallback when no home
+		return nil, fmt.Errorf("ssh: cannot resolve home for known_hosts (set QUIKSYNC_SSH_INSECURE=1 for labs): %w", err)
 	}
-	path := filepath.Join(home, ".ssh", "known_hosts")
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		return nil, fmt.Errorf("ssh: create ~/.ssh: %w", err)
+	}
+	path := filepath.Join(sshDir, "known_hosts")
 	if _, err := os.Stat(path); err != nil {
-		// Match harness StrictHostKeyChecking=accept-new for first contact.
-		return cryptossh.InsecureIgnoreHostKey(), nil //nolint:gosec
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("ssh: known_hosts: %w", err)
+		}
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			return nil, fmt.Errorf("ssh: create known_hosts: %w", err)
+		}
 	}
 	cb, err := knownhosts.New(path)
 	if err != nil {
@@ -113,7 +132,7 @@ func nativeHostKeyCallback() (cryptossh.HostKeyCallback, error) {
 		if err == nil {
 			return nil
 		}
-		// Unknown host: accept once (accept-new style).
+		// Unknown host: accept once (accept-new style) and pin.
 		if keyErr, ok := err.(*knownhosts.KeyError); ok && len(keyErr.Want) == 0 {
 			line := knownhosts.Line([]string{knownhosts.Normalize(hostname)}, key)
 			f, openErr := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)

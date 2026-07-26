@@ -98,3 +98,18 @@ func (c *Cache) Put(rel string, size int64, modNano int64, avgSize uint32, sig c
 	}
 	return os.WriteFile(path, b, 0o644)
 }
+
+// Delete removes a cached signature for rel (best-effort; missing is ok).
+func (c *Cache) Delete(rel string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	path, err := c.pathFor(rel)
+	if err != nil {
+		return err
+	}
+	err = os.Remove(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}

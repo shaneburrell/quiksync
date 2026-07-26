@@ -3,7 +3,7 @@ package nfs
 
 import (
 	"context"
-	"crypto/sha256"
+	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -85,7 +85,7 @@ func New(ctx context.Context, ep transport.Endpoint) (*Transport, error) {
 	if err != nil {
 		return nil, fmt.Errorf("nfs dial mount (experimental NFSv3/AUTH_SYS): %w", err)
 	}
-	auth := nfsrpc.NewAuthUnix("quiksync", 0, 0).Auth()
+	auth := nfsrpc.NewAuthUnix("quiksync", authUnixUID(), authUnixGID()).Auth()
 
 	var (
 		target  *gonfs.Target
@@ -346,9 +346,12 @@ type writeSession struct {
 	committed bool
 }
 
-func partialName(rel string) string {
-	sum := sha256.Sum256([]byte(filepath.ToSlash(rel)))
-	return hex.EncodeToString(sum[:8]) + ".partial"
+func uniquePartialName() (string, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]) + ".partial", nil
 }
 
 func (t *Transport) BeginWrite(ctx context.Context, rel string, size int64) (transport.WriteSession, error) {
@@ -368,11 +371,15 @@ func (t *Transport) BeginWrite(ctx context.Context, rel string, size int64) (tra
 	if err := t.MkdirAll(ctx, tmpDirUser); err != nil {
 		return nil, err
 	}
-	tmpRel, err := t.joinBase(tmpDirUser + "/" + partialName(rel))
+	name, err := uniquePartialName()
 	if err != nil {
 		return nil, err
 	}
-	_ = t.target.Remove(tmpRel)
+	tmpRel, err := t.joinBase(tmpDirUser + "/" + name)
+	if err != nil {
+		return nil, err
+	}
+	// Unique name: do not Remove a peer writer's staging path.
 	staging, err := t.target.OpenFile(tmpRel, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("nfs staging create: %w", err)

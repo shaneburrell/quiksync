@@ -87,27 +87,16 @@ func TestNativeHostKeyCallback(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
+	t.Setenv("QUIKSYNC_SSH_INSECURE", "")
 
+	// Missing known_hosts: create + accept-new pin (not permanent ignore).
 	cb, err := nativeHostKeyCallback()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := cb("example.com:22", &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 22}, dummyHostKey(t)); err != nil {
-		t.Fatalf("empty known_hosts should accept: %v", err)
-	}
-
-	sshDir := filepath.Join(home, ".ssh")
-	if err := os.MkdirAll(sshDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	khPath := filepath.Join(sshDir, "known_hosts")
-	if err := os.WriteFile(khPath, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	cb, err = nativeHostKeyCallback()
-	if err != nil {
-		t.Fatal(err)
+	khPath := filepath.Join(home, ".ssh", "known_hosts")
+	if _, err := os.Stat(khPath); err != nil {
+		t.Fatalf("known_hosts should be created: %v", err)
 	}
 	key := dummyHostKey(t)
 	addr := &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 2222}
@@ -138,6 +127,17 @@ func TestNativeHostKeyCallback(t *testing.T) {
 	}
 	if err := cb("[127.0.0.1]:2223", addr2, dummyHostKey(t)); err == nil {
 		t.Fatal("expected host key mismatch error")
+	}
+}
+
+func TestNativeHostKeyInsecureEnv(t *testing.T) {
+	t.Setenv("QUIKSYNC_SSH_INSECURE", "1")
+	cb, err := nativeHostKeyCallback()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cb("evil.example", &net.TCPAddr{IP: net.ParseIP("1.2.3.4"), Port: 22}, dummyHostKey(t)); err != nil {
+		t.Fatalf("insecure should accept: %v", err)
 	}
 }
 

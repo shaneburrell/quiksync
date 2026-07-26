@@ -8,6 +8,37 @@ import (
 	"github.com/shaneburrell/quiksync/internal/transport"
 )
 
+func TestAuthUnixUsesProcessIdentity(t *testing.T) {
+	uid, gid := authUnixUID(), authUnixGID()
+	if p := processUID(); p >= 0 && uint32(p) != uid {
+		t.Fatalf("AUTH_SYS uid=%d want process uid=%d", uid, p)
+	}
+	if p := processGID(); p >= 0 && uint32(p) != gid {
+		t.Fatalf("AUTH_SYS gid=%d want process gid=%d", gid, p)
+	}
+	// Windows stubs use nobody, never root.
+	if processUID() < 0 && uid == 0 {
+		t.Fatal("Windows AUTH_SYS stub must not claim root")
+	}
+}
+
+func TestUniquePartialName(t *testing.T) {
+	a, err := uniquePartialName()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := uniquePartialName()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == b {
+		t.Fatalf("expected unique names, got %q", a)
+	}
+	if !strings.HasSuffix(a, ".partial") {
+		t.Fatalf("suffix: %q", a)
+	}
+}
+
 func TestNewValidation(t *testing.T) {
 	ctx := context.Background()
 	if _, err := New(ctx, transport.Endpoint{Scheme: "nfs"}); err == nil || !strings.Contains(err.Error(), "host") {

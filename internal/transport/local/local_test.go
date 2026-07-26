@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -155,46 +156,57 @@ func TestAbortRemovesTemp(t *testing.T) {
 	}
 }
 
-func TestBeginWriteRejectsStagingSymlinkEscape(t *testing.T) {
+func TestBeginWriteRejectsStagingDirSymlink(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()
-	secret := filepath.Join(outside, "secret.txt")
-	if err := os.WriteFile(secret, []byte("SAFE"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	tmpDir := filepath.Join(root, ".quiksync.tmp")
-	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	// Old nested layout + hashed name: both must not write outside.
-	if err := os.Symlink(secret, filepath.Join(tmpDir, "evil.txt.partial")); err != nil {
+	if err := os.Symlink(outside, filepath.Join(root, ".quiksync.tmp")); err != nil {
 		t.Skipf("symlink: %v", err)
 	}
-	hashName := partialTempName("evil.txt")
-	if err := os.Symlink(secret, filepath.Join(tmpDir, hashName)); err != nil {
+	tr, err := New(root)
+	if err != nil {
 		t.Fatal(err)
 	}
+	_, err = tr.BeginWrite(context.Background(), "evil.txt", 4)
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("expected staging dir symlink rejection, got %v", err)
+	}
+}
 
+func TestConcurrentBeginWriteUniqueStaging(t *testing.T) {
+	root := t.TempDir()
 	tr, err := New(root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	ws, err := tr.BeginWrite(ctx, "evil.txt", 4)
+	ws1, err := tr.BeginWrite(ctx, "same.txt", 4)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ws.WriteChunk(ctx, 0, compress.CodecNone, 4, []byte("pwn!")); err != nil {
-		t.Fatal(err)
-	}
-	if err := ws.Abort(); err != nil {
-		t.Fatal(err)
-	}
-	got, err := os.ReadFile(secret)
+	ws2, err := tr.BeginWrite(ctx, "same.txt", 4)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got) != "SAFE" {
-		t.Fatalf("staging symlink escape: outside became %q", got)
+	if err := ws1.WriteChunk(ctx, 0, compress.CodecNone, 4, []byte("aaaa")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ws2.WriteChunk(ctx, 0, compress.CodecNone, 4, []byte("bbbb")); err != nil {
+		t.Fatal(err)
+	}
+	digA := chunk.Sum([]byte("aaaa"))
+	digB := chunk.Sum([]byte("bbbb"))
+	if err := ws1.Commit(ctx, digA, 0o644, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	// Second commit may overwrite dest, but must only promote its own verified inode.
+	if err := ws2.Commit(ctx, digB, 0o644, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(root, "same.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "bbbb" {
+		t.Fatalf("dest=%q want bbbb", got)
 	}
 }

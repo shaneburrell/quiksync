@@ -31,6 +31,7 @@ Security fixes are applied to the latest release on `main` / the newest `v*` tag
 
 - Mounted NFS paths use the local transport; trust the mount and export options (root squashing, sec=).
 - Native `nfs://` is **experimental** (NFSv3 + AUTH_SYS only, unencrypted) and expands the network attack surface versus a kernel mount. Prefer mounts for production. Writes use staged temp files + NFSv3 `RENAME`; mode/mtime are not applied. Custom ports are rejected (portmapper-based dial).
+- AUTH_SYS identity is the **local process** uid/gid (`os.Getuid`/`Getgid` on Unix; nobody on Windows stubs), not root. This is not a capability grant — exports with `no_root_squash` still trust the claimed id on the wire.
 
 ## Mid-hop relay
 

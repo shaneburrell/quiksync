@@ -16,6 +16,56 @@ import (
 	"github.com/shaneburrell/quiksync/internal/transport"
 )
 
+func TestS3StaleSidecarFallsBackWhenObjectReplaced(t *testing.T) {
+	ctx := context.Background()
+	mem := NewMemory()
+	tr, err := New(ctx, transport.Endpoint{Scheme: "s3", Host: "bucket", Path: "p"}, Options{Client: mem, StagingDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tr.Close() }()
+
+	orig := []byte("original-object-body-aaaa")
+	ws, err := tr.BeginWrite(ctx, "f.txt", int64(len(orig)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ws.WriteChunk(ctx, 0, compress.CodecNone, len(orig), orig); err != nil {
+		t.Fatal(err)
+	}
+	origDig := chunk.Sum(orig)
+	if err := ws.Commit(ctx, origDig, 0o644, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Replace object body; leave sidecar pointing at old digest.
+	replaced := []byte("replaced-object-body-bbbb")
+	if len(replaced) != len(orig) {
+		t.Fatal("size mismatch")
+	}
+	_, err = mem.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String("bucket"),
+		Key:    aws.String("p/f.txt"),
+		Body:   strings.NewReader(string(replaced)),
+		Metadata: map[string]string{
+			metaBlake3: chunk.Sum(replaced).String(),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := tr.GetSignature(ctx, "f.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sig.Digest == origDig {
+		t.Fatal("stale sidecar digest must not be trusted after object replace")
+	}
+	if sig.Digest != chunk.Sum(replaced) {
+		t.Fatalf("want replaced digest, got %s", sig.Digest)
+	}
+}
+
 func TestS3CorruptSidecarFallsBackToChunking(t *testing.T) {
 	ctx := context.Background()
 	mem := NewMemory()

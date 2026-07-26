@@ -2,8 +2,6 @@ package local
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -87,11 +85,7 @@ func (t *Transport) Stat(ctx context.Context, rel string) (transport.FileMeta, e
 }
 
 func (t *Transport) OpenRead(ctx context.Context, rel string) (io.ReadCloser, error) {
-	p, err := t.abs(rel)
-	if err != nil {
-		return nil, err
-	}
-	return os.Open(p)
+	return transport.OpenConfined(t.root, rel)
 }
 
 func (t *Transport) Remove(ctx context.Context, rel string) error {
@@ -111,11 +105,7 @@ func (t *Transport) MkdirAll(ctx context.Context, rel string) error {
 }
 
 func (t *Transport) GetSignature(ctx context.Context, rel string) (chunk.FileSignature, error) {
-	p, err := t.abs(rel)
-	if err != nil {
-		return chunk.FileSignature{}, err
-	}
-	f, err := os.Open(p)
+	f, err := transport.OpenConfined(t.root, rel)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return chunk.FileSignature{}, nil
@@ -142,11 +132,6 @@ type writeSession struct {
 	nfs        bool
 }
 
-func partialTempName(rel string) string {
-	sum := sha256.Sum256([]byte(filepath.ToSlash(rel)))
-	return hex.EncodeToString(sum[:8]) + ".partial"
-}
-
 func (t *Transport) BeginWrite(ctx context.Context, rel string, size int64) (transport.WriteSession, error) {
 	dest, err := t.abs(rel)
 	if err != nil {
@@ -154,24 +139,21 @@ func (t *Transport) BeginWrite(ctx context.Context, rel string, size int64) (tra
 	}
 	// Prefer staging beside dest for same-directory rename (important on NFS).
 	tmpDir := filepath.Join(filepath.Dir(dest), ".quiksync.tmp")
-	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
-		// Fall back to root staging dir.
+	if err := ensureStagingDir(tmpDir); err != nil {
 		tmpDir = filepath.Join(t.root, ".quiksync.tmp")
-		if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		if err := ensureStagingDir(tmpDir); err != nil {
 			return nil, err
 		}
 	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return nil, err
 	}
-	tmp := filepath.Join(tmpDir, partialTempName(rel))
-	if err := prepareStagingFile(tmp); err != nil {
-		return nil, err
-	}
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_RDWR|os.O_EXCL, 0o644)
+	// Unique per-session name: never unlink a peer writer's staging file.
+	f, err := os.CreateTemp(tmpDir, "qs-*.partial")
 	if err != nil {
 		return nil, err
 	}
+	tmp := f.Name()
 	if size > 0 {
 		if err := f.Truncate(size); err != nil {
 			_ = f.Close()
@@ -180,40 +162,37 @@ func (t *Transport) BeginWrite(ctx context.Context, rel string, size int64) (tra
 		}
 	}
 	ws := &writeSession{destAbs: dest, tempAbs: tmp, f: f, size: size, nfs: t.nfs}
-	if st, err := os.Stat(dest); err == nil && st.Mode().IsRegular() {
-		old, err := os.Open(dest)
+	if st, err := os.Lstat(dest); err == nil && st.Mode().IsRegular() {
+		old, err := transport.OpenConfined(t.root, rel)
 		if err == nil {
 			ws.old = old
 			ws.oldSize = st.Size()
-			ws.oldModNano = st.ModTime().UnixNano()
+			// Use Stat for mtime of the regular file (Lstat size matches).
+			if st2, err := os.Stat(dest); err == nil {
+				ws.oldModNano = st2.ModTime().UnixNano()
+				ws.oldSize = st2.Size()
+			}
 		}
 	}
 	return ws, nil
 }
 
-// prepareStagingFile removes any existing path at tmp so OpenFile O_EXCL can
-// create a fresh regular file. Refuses to leave symlinks in place (escape).
-func prepareStagingFile(tmp string) error {
-	fi, err := os.Lstat(tmp)
+// ensureStagingDir creates tmpDir as a real directory, rejecting symlink paths.
+func ensureStagingDir(tmpDir string) error {
+	fi, err := os.Lstat(tmpDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return os.MkdirAll(tmpDir, 0o755)
 		}
 		return err
 	}
 	if fi.Mode()&os.ModeSymlink != 0 {
-		if err := os.Remove(tmp); err != nil {
-			return fmt.Errorf("remove staging symlink: %w", err)
-		}
-		return nil
+		return fmt.Errorf("staging dir is a symlink: %s", tmpDir)
 	}
-	if !fi.Mode().IsRegular() {
-		if err := os.RemoveAll(tmp); err != nil {
-			return fmt.Errorf("remove non-regular staging path: %w", err)
-		}
-		return nil
+	if !fi.IsDir() {
+		return fmt.Errorf("staging path is not a directory: %s", tmpDir)
 	}
-	return os.Remove(tmp)
+	return nil
 }
 
 func (w *writeSession) WriteChunk(ctx context.Context, offset uint64, codec compress.Codec, uncompressedLen int, data []byte) error {

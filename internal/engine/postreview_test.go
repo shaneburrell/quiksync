@@ -12,6 +12,48 @@ import (
 	"github.com/shaneburrell/quiksync/internal/transport/local"
 )
 
+func TestForceTransferIgnoresStaleIndex(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	payload := []byte("ORIGINAL!!")
+	corrupt := []byte("CORRUPTED!")
+	if len(corrupt) != len(payload) {
+		t.Fatalf("size mismatch %d vs %d", len(corrupt), len(payload))
+	}
+	if err := os.WriteFile(filepath.Join(src, "a.txt"), payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := engine.Config{Source: src, Dest: dst, Resume: true, Tune: baseTune()}
+	if _, err := engine.Run(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	// Index is now populated. Corrupt dest in place; preserve size/mtime.
+	destPath := filepath.Join(dst, "a.txt")
+	st, err := os.Stat(destPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destPath, corrupt, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(destPath, st.ModTime(), st.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := engine.Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.FilesCopied < 1 {
+		t.Fatalf("stale index must not skip after journal digest mismatch: %+v", stats)
+	}
+	got, err := os.ReadFile(destPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("dest not repaired: %q", got)
+	}
+}
+
 func TestJournalSkipHonorsSrcDigest(t *testing.T) {
 	src, dst := t.TempDir(), t.TempDir()
 	payload := []byte("AAAAAAAAAA")

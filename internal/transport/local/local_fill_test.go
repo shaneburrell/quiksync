@@ -114,9 +114,8 @@ func TestLocalPrepareStagingNonRegular(t *testing.T) {
 	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	name := partialTempName("dir.txt")
-	staging := filepath.Join(tmpDir, name)
-	if err := os.Mkdir(staging, 0o755); err != nil {
+	// Leftover non-regular paths under staging must not block CreateTemp.
+	if err := os.Mkdir(filepath.Join(tmpDir, "leftover-dir"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	tr, err := New(root)

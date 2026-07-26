@@ -463,6 +463,9 @@ func tryTransfer(
 					if e.SrcDigest == "" {
 						// Missing digest: do not trust journal skip.
 						forceTransfer = true
+						if idx != nil {
+							_ = idx.Delete(meta.RelPath)
+						}
 					} else if match, herr := destDigestMatches(ctx, dst, meta.RelPath, e.SrcDigest); herr != nil {
 						return 0, 0, 0, 0, "failed", 0, 0, herr
 					} else if match {
@@ -470,6 +473,9 @@ func tryTransfer(
 					} else {
 						// Digest mismatch despite matching size/mtime — must re-copy.
 						forceTransfer = true
+						if idx != nil {
+							_ = idx.Delete(meta.RelPath)
+						}
 					}
 				}
 			}
@@ -512,7 +518,8 @@ func tryTransfer(
 	}
 
 	var destSig chunk.FileSignature
-	if idx != nil && !cfg.Checksum {
+	// Never trust a stale index when journal already proved dest content is wrong.
+	if idx != nil && !cfg.Checksum && !forceTransfer {
 		if dm, err := dst.Stat(ctx, meta.RelPath); err == nil {
 			if cached, ok := idx.Get(meta.RelPath, dm.Size, dm.ModTime.UnixNano(), cdcAvg); ok {
 				destSig = cached
@@ -527,7 +534,7 @@ func tryTransfer(
 		}
 	}
 
-	if !delta.NeedsTransfer(sig, destSig, cfg.Checksum) && sig.Digest == destSig.Digest {
+	if !forceTransfer && !delta.NeedsTransfer(sig, destSig, cfg.Checksum) && sig.Digest == destSig.Digest {
 		return 0, 0, 0, 0, "skipped", 0, 0, nil
 	}
 	plan := delta.Diff(sig, destSig)

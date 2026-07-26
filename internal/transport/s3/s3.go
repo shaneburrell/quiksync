@@ -280,7 +280,10 @@ func (t *Transport) GetSignature(ctx context.Context, rel string) (chunk.FileSig
 		defer func() { _ = resp.Body.Close() }()
 		var sig chunk.FileSignature
 		if err := json.NewDecoder(resp.Body).Decode(&sig); err == nil && len(sig.Chunks) > 0 {
-			return sig, nil
+			if t.sidecarBoundToObject(ctx, rel, sig) {
+				return sig, nil
+			}
+			// Stale/poisoned sidecar: fall through to hash the object body.
 		}
 	}
 	rc, err := t.OpenRead(ctx, rel)
@@ -293,6 +296,30 @@ func (t *Transport) GetSignature(ctx context.Context, rel string) (chunk.FileSig
 		return chunk.FileSignature{}, err
 	}
 	return chunk.ChunkReader(rc, st.Size, chunk.Options{})
+}
+
+// sidecarBoundToObject reports whether the sidecar still matches the live object
+// size and quiksync-blake3 metadata (set on Commit).
+func (t *Transport) sidecarBoundToObject(ctx context.Context, rel string, sig chunk.FileSignature) bool {
+	head, err := t.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(t.bucket),
+		Key:    aws.String(t.key(rel)),
+	})
+	if err != nil {
+		return false
+	}
+	if aws.ToInt64(head.ContentLength) != sig.Size {
+		return false
+	}
+	want := sig.Digest.String()
+	if dig, ok := head.Metadata[metaBlake3]; ok && dig == want {
+		return true
+	}
+	// AWS SDK returns metadata keys lowercased.
+	if dig, ok := head.Metadata[strings.ToLower(metaBlake3)]; ok && dig == want {
+		return true
+	}
+	return false
 }
 
 type writeSession struct {

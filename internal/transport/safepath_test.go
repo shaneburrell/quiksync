@@ -58,3 +58,28 @@ func TestConfineRejectsSymlinkEscape(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestOpenConfinedRejectsSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "ok.txt"), []byte("in"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := OpenConfined(root, "ok.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+
+	link := filepath.Join(root, "leak")
+	if err := os.Symlink(secret, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	if _, err := OpenConfined(root, "leak"); err == nil {
+		t.Fatal("expected OpenConfined to reject symlink escape")
+	}
+}
