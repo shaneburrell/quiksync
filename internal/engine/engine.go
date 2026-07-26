@@ -735,6 +735,11 @@ func Verify(ctx context.Context, source, dest string) ([]string, error) {
 
 // VerifyWith is Verify with transport open options (S3 endpoint/region, QUIC auth, …).
 func VerifyWith(ctx context.Context, source, dest string, opts transport.OpenOptions) ([]string, error) {
+	return VerifyFiltered(ctx, source, dest, opts, nil)
+}
+
+// VerifyFiltered is VerifyWith plus source-side exclude globs (same semantics as copy/sync --exclude).
+func VerifyFiltered(ctx context.Context, source, dest string, opts transport.OpenOptions, exclude []string) ([]string, error) {
 	srcEP, err := transport.ParseEndpoint(source)
 	if err != nil {
 		return nil, err
@@ -754,7 +759,7 @@ func VerifyWith(ctx context.Context, source, dest string, opts transport.OpenOpt
 	}
 	defer func() { _ = dst.Close() }()
 
-	files, err := src.Walk(ctx, nil)
+	files, err := src.Walk(ctx, exclude)
 	if err != nil {
 		return nil, err
 	}

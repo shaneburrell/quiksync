@@ -12,6 +12,7 @@ import (
 	"github.com/shaneburrell/quiksync/internal/compress"
 	"github.com/shaneburrell/quiksync/internal/engine"
 	"github.com/shaneburrell/quiksync/internal/journal"
+	"github.com/shaneburrell/quiksync/internal/transport"
 )
 
 func TestVerifyMismatches(t *testing.T) {
@@ -31,6 +32,29 @@ func TestVerifyMismatches(t *testing.T) {
 	joined := strings.Join(mismatches, "\n")
 	if !strings.Contains(joined, "a.txt") || !strings.Contains(joined, "b.txt") {
 		t.Fatalf("mismatches: %v", mismatches)
+	}
+}
+
+func TestVerifyFilteredExclude(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	writeFile(t, filepath.Join(src, "keep.txt"), []byte("keep"))
+	writeFile(t, filepath.Join(src, "skip.tmp"), []byte("skip"))
+	writeFile(t, filepath.Join(dst, "keep.txt"), []byte("keep"))
+	// skip.tmp deliberately missing on dest — exclude should hide it from verify
+
+	mismatches, err := engine.VerifyFiltered(context.Background(), src, dst, transport.OpenOptions{}, []string{"*.tmp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mismatches) != 0 {
+		t.Fatalf("expected no mismatches with exclude, got %v", mismatches)
+	}
+	mismatches, err = engine.Verify(context.Background(), src, dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mismatches) == 0 {
+		t.Fatal("expected mismatch for skip.tmp without exclude")
 	}
 }
 

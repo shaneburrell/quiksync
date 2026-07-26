@@ -10,8 +10,9 @@ import (
 	"github.com/vmware/go-nfs-client/nfs/xdr"
 )
 
-// NFSv3 RENAME is proc 11 (not exposed by go-nfs-client).
-const nfsProc3Rename = 11
+// NFSv3 RENAME is proc 14 (RFC 1813). go-nfs-client omits this constant;
+// proc 11 is MKNOD — using it yields RPC GARBAGE_ARGS on rename.
+const nfsProc3Rename = 14
 
 // rename replaces toRel with fromRel via NFSv3 RENAME (atomic on the server).
 func (t *Transport) rename(fromRel, toRel string) error {

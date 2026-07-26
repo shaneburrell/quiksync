@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	cryptossh "golang.org/x/crypto/ssh"
+
 	"github.com/shaneburrell/quiksync/internal/chunk"
 	"github.com/shaneburrell/quiksync/internal/compress"
 	"github.com/shaneburrell/quiksync/internal/protocol"
@@ -20,38 +22,27 @@ var Command = "ssh"
 
 // Transport talks to a remote `quiksync remote-helper` over SSH stdio.
 type Transport struct {
-	ep     transport.Endpoint
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout io.ReadCloser
-	mu     sync.Mutex
-	caps   transport.Caps
+	ep      transport.Endpoint
+	cmd     *exec.Cmd
+	client  *cryptossh.Client
+	session *cryptossh.Session
+	stdin   io.WriteCloser
+	stdout  io.Reader
+	mu      sync.Mutex
+	caps    transport.Caps
 }
 
 func New(ctx context.Context, ep transport.Endpoint) (*Transport, error) {
-	target := ep.Host
-	if ep.User != "" {
-		target = ep.User + "@" + ep.Host
+	var t *Transport
+	var err error
+	if useNativeSSH() {
+		t, err = newNative(ctx, ep)
+	} else {
+		t, err = newExec(ctx, ep)
 	}
-	args := []string{}
-	if ep.Port != "" {
-		args = append(args, "-p", ep.Port)
-	}
-	args = append(args, target, "quiksync", "remote-helper")
-	cmd := exec.CommandContext(ctx, Command, args...)
-	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
 	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, err
-	}
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("ssh start: %w", err)
-	}
-	t := &Transport{ep: ep, cmd: cmd, stdin: stdin, stdout: stdout}
 	if err := protocol.WriteJSON(t.stdin, protocol.MsgHello, protocol.Hello{Version: protocol.ProtocolVersion, Root: ep.Path}); err != nil {
 		_ = t.Close()
 		return nil, err
@@ -86,6 +77,76 @@ func New(ctx context.Context, ep transport.Endpoint) (*Transport, error) {
 	return t, nil
 }
 
+func newNative(ctx context.Context, ep transport.Endpoint) (*Transport, error) {
+	_ = ctx
+	client, session, err := dialNative(ep)
+	if err != nil {
+		return nil, err
+	}
+	stdin, err := session.StdinPipe()
+	if err != nil {
+		_ = session.Close()
+		_ = client.Close()
+		return nil, err
+	}
+	stdout, err := session.StdoutPipe()
+	if err != nil {
+		_ = stdin.Close()
+		_ = session.Close()
+		_ = client.Close()
+		return nil, err
+	}
+	stderr, err := session.StderrPipe()
+	if err != nil {
+		_ = stdin.Close()
+		_ = session.Close()
+		_ = client.Close()
+		return nil, err
+	}
+	go func() { _, _ = io.Copy(io.Discard, stderr) }()
+	if err := session.Start("quiksync remote-helper"); err != nil {
+		_ = stdin.Close()
+		_ = session.Close()
+		_ = client.Close()
+		return nil, fmt.Errorf("ssh start remote-helper: %w", err)
+	}
+	return &Transport{ep: ep, client: client, session: session, stdin: stdin, stdout: stdout}, nil
+}
+
+func newExec(ctx context.Context, ep transport.Endpoint) (*Transport, error) {
+	target := ep.Host
+	if ep.User != "" {
+		target = ep.User + "@" + ep.Host
+	}
+	// -T: no TTY (required for binary remote-helper framing).
+	// BatchMode: never block on interactive password/host-key prompts.
+	args := []string{"-T", "-o", "BatchMode=yes"}
+	if ep.Port != "" {
+		args = append(args, "-p", ep.Port)
+	}
+	args = append(args, target, "quiksync", "remote-helper")
+	cmd := exec.CommandContext(ctx, Command, args...)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	// Drain stderr in a goroutine. Sharing os.Stderr can deadlock under nested
+	// SSH (e.g. Mac→Windows→Linux) when OpenSSH fills the channel window.
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("ssh start: %w", err)
+	}
+	go func() { _, _ = io.Copy(io.Discard, stderr) }()
+	return &Transport{ep: ep, cmd: cmd, stdin: stdin, stdout: stdout}, nil
+}
+
 func mapCaps(ok protocol.HelloOK) transport.Caps {
 	if ok.Version == "" || ok.Version == "1" {
 		// Pre-reuse remotes: full-wire fallback only.
@@ -106,11 +167,23 @@ func (t *Transport) Close() error {
 	defer t.mu.Unlock()
 	_ = protocol.WriteMsg(t.stdin, protocol.MsgBye, nil)
 	_ = t.stdin.Close()
-	_ = t.stdout.Close()
-	if t.cmd != nil {
-		return t.cmd.Wait()
+	if c, ok := t.stdout.(io.Closer); ok {
+		_ = c.Close()
 	}
-	return nil
+	var err error
+	if t.session != nil {
+		_ = t.session.Close()
+		t.session = nil
+	}
+	if t.client != nil {
+		err = t.client.Close()
+		t.client = nil
+	}
+	if t.cmd != nil {
+		err = t.cmd.Wait()
+		t.cmd = nil
+	}
+	return err
 }
 
 func (t *Transport) Root() string { return t.ep.Path }

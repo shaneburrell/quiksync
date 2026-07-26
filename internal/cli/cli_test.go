@@ -64,6 +64,19 @@ func TestCLISyncDeleteVerify(t *testing.T) {
 	}
 }
 
+func TestCLIVerifyExclude(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	mustWrite(t, filepath.Join(src, "keep.txt"), "keep")
+	mustWrite(t, filepath.Join(src, "skip.tmp"), "skip")
+	mustWrite(t, filepath.Join(dst, "keep.txt"), "keep")
+	if err := cli.ExecuteArgs([]string{"verify", src, dst, "--exclude", "*.tmp"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cli.ExecuteArgs([]string{"verify", src, dst}); err == nil {
+		t.Fatal("expected mismatch without exclude")
+	}
+}
+
 func TestCLIInvalidCompress(t *testing.T) {
 	src, dst := t.TempDir(), t.TempDir()
 	mustWrite(t, filepath.Join(src, "a.txt"), "a")

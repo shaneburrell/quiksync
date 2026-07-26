@@ -74,6 +74,7 @@ func newSyncCmd() *cobra.Command {
 func newVerifyCmd() *cobra.Command {
 	var s3Endpoint, s3Region, authToken string
 	var insecure bool
+	var exclude []string
 	cmd := &cobra.Command{
 		Use:   "verify SRC DEST",
 		Short: "Compare source and destination digests",
@@ -88,7 +89,7 @@ func newVerifyCmd() *cobra.Command {
 				S3Endpoint: s3Endpoint,
 				S3Region:   s3Region,
 			}
-			mismatches, err := engine.VerifyWith(context.Background(), args[0], args[1], opts)
+			mismatches, err := engine.VerifyFiltered(context.Background(), args[0], args[1], opts, exclude)
 			if err != nil {
 				return err
 			}
@@ -102,6 +103,7 @@ func newVerifyCmd() *cobra.Command {
 			return fmt.Errorf("%d mismatch(es)", len(mismatches))
 		},
 	}
+	cmd.Flags().StringSliceVar(&exclude, "exclude", nil, "exclude glob patterns (same as copy/sync)")
 	cmd.Flags().StringVar(&s3Endpoint, "s3-endpoint", "", "S3-compatible endpoint URL (MinIO/R2)")
 	cmd.Flags().StringVar(&s3Region, "s3-region", "", "S3 region (or AWS_REGION)")
 	cmd.Flags().BoolVar(&insecure, "insecure", false, "skip QUIC TOFU certificate pinning (labs only)")
