@@ -34,13 +34,15 @@ func Walk(root string, exclude []string) ([]FileInfo, error) {
 		if rel == "." {
 			return nil
 		}
-		// Skip internal state dirs.
+		// Skip internal state dirs at any depth (staging is beside each dest file).
 		parts := strings.Split(rel, string(os.PathSeparator))
-		if parts[0] == ".quiksync" || parts[0] == ".quiksync.tmp" {
-			if d.IsDir() {
-				return filepath.SkipDir
+		for _, p := range parts {
+			if p == ".quiksync" || p == ".quiksync.tmp" {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
 			}
-			return nil
 		}
 		if matchExclude(rel, exclude) {
 			if d.IsDir() {

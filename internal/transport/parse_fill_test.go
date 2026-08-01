@@ -1,6 +1,9 @@
 package transport
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseEndpointMoreSchemes(t *testing.T) {
 	ep, err := ParseEndpoint("quiksync://host.example/data")
@@ -24,5 +27,25 @@ func TestParseEndpointMoreSchemes(t *testing.T) {
 	}
 	if _, err := ParseEndpoint(""); err == nil {
 		t.Fatal("empty")
+	}
+}
+
+func TestParseEndpointRejectsSSHInjection(t *testing.T) {
+	bad := []string{
+		"-oProxyCommand=id:/dst",
+		"user@-oProxyCommand=id:/dst",
+		"-evil@host:/dst",
+		"ssh://-oProxyCommand=evil/dst",
+		"ssh://user@host:abc/dst",
+		"ssh://user@host:0/dst",
+		"ssh://user@host:70000/dst",
+	}
+	for _, in := range bad {
+		if _, err := ParseEndpoint(in); err == nil {
+			t.Fatalf("expected reject for %q", in)
+		} else if !strings.Contains(err.Error(), "ssh endpoint") && !strings.Contains(err.Error(), "invalid") {
+			// url.Parse may fail first for some ssh:// forms; either is fine.
+			_ = err
+		}
 	}
 }

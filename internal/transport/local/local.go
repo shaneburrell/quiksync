@@ -219,8 +219,8 @@ func (w *writeSession) ReuseChunk(ctx context.Context, newOffset, oldOffset uint
 	if err := w.checkOldUnchanged(); err != nil {
 		return err
 	}
-	if length < 0 {
-		return fmt.Errorf("reuse chunk: negative length")
+	if err := transport.ValidateReuseRange(oldOffset, length, w.oldSize); err != nil {
+		return err
 	}
 	buf := make([]byte, length)
 	n, err := w.old.ReadAt(buf, int64(oldOffset))

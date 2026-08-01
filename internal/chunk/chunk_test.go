@@ -38,6 +38,11 @@ func TestChunkReaderDeterministic(t *testing.T) {
 	if len(sig1.Chunks) == 0 {
 		t.Fatal("expected chunks")
 	}
+	for _, c := range sig2.Chunks {
+		if c.Data != nil {
+			t.Fatal("KeepData:false must not retain payloads")
+		}
+	}
 	var rebuilt []byte
 	for _, c := range sig1.Chunks {
 		rebuilt = append(rebuilt, c.Data...)
@@ -47,6 +52,39 @@ func TestChunkReaderDeterministic(t *testing.T) {
 	}
 	if !bytes.Equal(rebuilt, data) {
 		t.Fatalf("rebuild mismatch: got %d want %d", len(rebuilt), len(data))
+	}
+}
+
+func TestStreamChunksMatchesChunkReader(t *testing.T) {
+	data := []byte(strings.Repeat("stream-chunk-payload-0123456789\n", 8000))
+	want, err := ChunkReader(bytes.NewReader(data), int64(len(data)), Options{KeepData: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotData []byte
+	var n int
+	got, err := StreamChunks(bytes.NewReader(data), int64(len(data)), Options{}, func(c Chunk) error {
+		n++
+		if c.Data == nil || len(c.Data) != int(c.Length) {
+			t.Fatalf("stream chunk missing data")
+		}
+		gotData = append(gotData, c.Data...)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Digest != want.Digest || got.Size != want.Size {
+		t.Fatalf("sig mismatch stream=%+v want=%+v", got, want)
+	}
+	if n != len(want.Chunks) {
+		t.Fatalf("chunks=%d want %d", n, len(want.Chunks))
+	}
+	if len(got.Chunks) != 0 {
+		t.Fatalf("StreamChunks must not retain chunk list payloads, got %d chunks", len(got.Chunks))
+	}
+	if !bytes.Equal(gotData, data) {
+		t.Fatalf("stream rebuild mismatch")
 	}
 }
 

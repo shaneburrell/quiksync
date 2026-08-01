@@ -499,7 +499,8 @@ func tryTransfer(
 	if cdcAvg == 0 {
 		cdcAvg = prof.FrameSize
 	}
-	opt := chunk.Options{AvgSize: cdcAvg, KeepData: true}
+	// Pass 1: metadata-only signature (no whole-file RAM retention).
+	opt := chunk.Options{AvgSize: cdcAvg, KeepData: false}
 	sig, err := chunk.ChunkReader(rc, meta.Size, opt)
 	closeErr := rc.Close()
 	if err != nil {
@@ -547,6 +548,7 @@ func tryTransfer(
 		reuseByNew[r.NewOffset] = r
 	}
 	canReuse := dst.Caps().SupportsReuseChunk && len(destSig.Chunks) > 0
+	fullWire := len(destSig.Chunks) == 0
 
 	if cfg.DryRun {
 		var payload int64
@@ -579,50 +581,62 @@ func tryTransfer(
 		}
 	}()
 
+	// Pass 2: re-read and stream chunks (payload held only for the current chunk).
+	rc2, err := src.OpenRead(ctx, meta.RelPath)
+	if err != nil {
+		return 0, 0, 0, 0, "failed", 0, 0, err
+	}
 	var payload, wireBytes int64
 	var chunksSent int64
 	codecPref := prof.Compress
-	for _, c := range sig.Chunks {
+	sig2, err := chunk.StreamChunks(rc2, meta.Size, opt, func(c chunk.Chunk) error {
 		if err := ctx.Err(); err != nil {
-			return 0, 0, 0, 0, "failed", 0, 0, err
+			return err
 		}
 		data := c.Data
 		if data == nil {
-			return 0, 0, 0, 0, "failed", 0, 0, fmt.Errorf("missing chunk data")
+			return fmt.Errorf("missing chunk data")
 		}
 		_, isMissing := missingSet[c.Digest]
-		if isMissing || len(destSig.Chunks) == 0 {
+		if isMissing || fullWire {
 			if err := limiter.Wait(ctx, len(data)); err != nil {
-				return 0, 0, 0, 0, "failed", 0, 0, err
+				return err
 			}
 			codec, enc, err := compress.Encode(codecPref, data)
 			if err != nil {
-				return 0, 0, 0, 0, "failed", 0, 0, err
+				return err
 			}
 			if err := ws.WriteChunk(ctx, c.Offset, codec, len(data), enc); err != nil {
-				return 0, 0, 0, 0, "failed", 0, 0, err
+				return err
 			}
 			payload += int64(len(data))
 			wireBytes += int64(len(enc))
 			chunksSent++
-			continue
+			return nil
 		}
 		re := reuseByNew[c.Offset]
 		if canReuse {
-			if err := ws.ReuseChunk(ctx, re.NewOffset, re.OldOffset, re.Digest, re.Length); err != nil {
-				return 0, 0, 0, 0, "failed", 0, 0, err
-			}
-			// Reused bytes do not count toward BytesWired / bandwidth limiter.
-			continue
+			return ws.ReuseChunk(ctx, re.NewOffset, re.OldOffset, re.Digest, re.Length)
 		}
 		// Legacy full-wire path when dest cannot reuse.
 		if err := limiter.Wait(ctx, len(data)); err != nil {
-			return 0, 0, 0, 0, "failed", 0, 0, err
+			return err
 		}
 		if err := ws.WriteChunk(ctx, c.Offset, compress.CodecNone, len(data), data); err != nil {
-			return 0, 0, 0, 0, "failed", 0, 0, err
+			return err
 		}
 		wireBytes += int64(len(data))
+		return nil
+	})
+	closeErr = rc2.Close()
+	if err != nil {
+		return 0, 0, 0, 0, "failed", 0, 0, err
+	}
+	if closeErr != nil {
+		return 0, 0, 0, 0, "failed", 0, 0, closeErr
+	}
+	if sig2.Digest != sig.Digest || sig2.Size != sig.Size {
+		return 0, 0, 0, 0, "failed", 0, 0, unstableError{fmt.Errorf("source changed during transfer read")}
 	}
 
 	st, err = src.Stat(ctx, meta.RelPath)

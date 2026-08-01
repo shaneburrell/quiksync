@@ -78,6 +78,31 @@ func TestLocalReuseTOCTOUAndDigestMismatch(t *testing.T) {
 	_ = ws2.Abort()
 }
 
+func TestLocalReuseChunkRejectsHugeLength(t *testing.T) {
+	root := t.TempDir()
+	tr, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	base := []byte("abcdefgh")
+	if err := os.WriteFile(filepath.Join(root, "t.bin"), base, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ws, err := tr.BeginWrite(ctx, "t.bin", int64(len(base)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ws.Abort() }()
+	huge := int(chunk.DefaultMaxSize) + 1
+	if err := ws.ReuseChunk(ctx, 0, 0, chunk.Sum(base), huge); err == nil || !strings.Contains(err.Error(), "exceeds max") {
+		t.Fatalf("expected max-size reject, got %v", err)
+	}
+	if err := ws.ReuseChunk(ctx, 0, 100, chunk.Sum(base), 1); err == nil || !strings.Contains(err.Error(), "out of bounds") {
+		t.Fatalf("expected oob reject, got %v", err)
+	}
+}
+
 func TestLocalWriteReuseAfterCommitAndNoOld(t *testing.T) {
 	tr, err := New(t.TempDir())
 	if err != nil {

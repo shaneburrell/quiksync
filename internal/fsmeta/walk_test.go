@@ -32,6 +32,35 @@ func TestWalkExcludeAndSkipQuiksync(t *testing.T) {
 	}
 }
 
+func TestWalkSkipsNestedQuiksyncTmp(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "a", "real.txt"), "keep")
+	mustWrite(t, filepath.Join(root, "a", ".quiksync.tmp", "qs-abc.partial"), "staging")
+	mustWrite(t, filepath.Join(root, "b", "c", ".quiksync.tmp", "qs-def.partial"), "staging")
+	mustWrite(t, filepath.Join(root, "b", "c", ".quiksync", "index"), "internal")
+	mustWrite(t, filepath.Join(root, "b", "c", "ok.txt"), "keep")
+
+	files, err := Walk(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, f := range files {
+		got[f.RelPath] = true
+	}
+	if !got["a/real.txt"] || !got["b/c/ok.txt"] {
+		t.Fatalf("missing expected files: %v", got)
+	}
+	if len(files) != 2 {
+		t.Fatalf("want 2 files, got %v", got)
+	}
+	for p := range got {
+		if filepath.Base(filepath.Dir(p)) == ".quiksync.tmp" || filepath.Base(filepath.Dir(p)) == ".quiksync" {
+			t.Fatalf("leaked internal path %q", p)
+		}
+	}
+}
+
 func TestUnchangedForAndGeneration(t *testing.T) {
 	fi := FileInfo{ModTime: time.Now().Add(-2 * time.Hour), Size: 10}
 	if !UnchangedFor(fi, time.Hour) {

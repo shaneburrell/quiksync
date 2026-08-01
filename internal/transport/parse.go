@@ -3,6 +3,7 @@ package transport
 import (
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -32,7 +33,11 @@ func ParseEndpoint(s string) (Endpoint, error) {
 				if path == "" {
 					path = "."
 				}
-				return Endpoint{Scheme: "ssh", User: user, Host: host, Path: path, Raw: s}, nil
+				ep := Endpoint{Scheme: "ssh", User: user, Host: host, Path: path, Raw: s}
+				if err := validateSSHEndpoint(ep); err != nil {
+					return Endpoint{}, err
+				}
+				return ep, nil
 			}
 		}
 	}
@@ -51,7 +56,11 @@ func ParseEndpoint(s string) (Endpoint, error) {
 				path = "/"
 			}
 			port := u.Port()
-			return Endpoint{Scheme: "ssh", User: u.User.Username(), Host: u.Hostname(), Port: port, Path: path, Raw: s}, nil
+			ep := Endpoint{Scheme: "ssh", User: u.User.Username(), Host: u.Hostname(), Port: port, Path: path, Raw: s}
+			if err := validateSSHEndpoint(ep); err != nil {
+				return Endpoint{}, err
+			}
+			return ep, nil
 		case "quiksync":
 			port := u.Port()
 			if port == "" {
@@ -81,6 +90,25 @@ func ParseEndpoint(s string) (Endpoint, error) {
 	}
 
 	return Endpoint{Scheme: "file", Path: s, Raw: s}, nil
+}
+
+func validateSSHEndpoint(ep Endpoint) error {
+	if ep.Host == "" {
+		return fmt.Errorf("ssh endpoint: empty host")
+	}
+	if strings.HasPrefix(ep.Host, "-") {
+		return fmt.Errorf("ssh endpoint: host must not start with '-'")
+	}
+	if ep.User != "" && strings.HasPrefix(ep.User, "-") {
+		return fmt.Errorf("ssh endpoint: user must not start with '-'")
+	}
+	if ep.Port != "" {
+		n, err := strconv.Atoi(ep.Port)
+		if err != nil || n < 1 || n > 65535 {
+			return fmt.Errorf("ssh endpoint: invalid port %q", ep.Port)
+		}
+	}
+	return nil
 }
 
 func isWindowsDrive(s string) bool {

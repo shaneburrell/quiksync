@@ -231,23 +231,18 @@ func Send(ctx context.Context, src, mid transport.Transport, opts SendOptions) e
 		if err != nil {
 			return err
 		}
-		sig, err := chunk.ChunkReader(rc, f.Size, chunk.Options{AvgSize: opts.ChunkAvg, KeepData: true})
-		_ = rc.Close()
-		if err != nil {
-			return err
-		}
 		mf := ManifestFile{
-			RelPath: f.RelPath, Size: f.Size, Digest: sig.Digest,
+			RelPath: f.RelPath, Size: f.Size,
 			Mode: uint32(f.Mode), ModNano: f.ModTime.UnixNano(),
 		}
-		for _, c := range sig.Chunks {
+		sig, err := chunk.StreamChunks(rc, f.Size, chunk.Options{AvgSize: opts.ChunkAvg}, func(c chunk.Chunk) error {
 			mf.Chunks = append(mf.Chunks, ManifestChunk{Offset: c.Offset, Length: c.Length, Digest: c.Digest})
 			if _, ok := uploaded[c.Digest]; ok {
-				continue
+				return nil
 			}
 			if _, err := mid.Stat(ctx, p.object(c.Digest)); err == nil {
 				uploaded[c.Digest] = struct{}{}
-				continue
+				return nil
 			}
 			if c.Data == nil {
 				return fmt.Errorf("missing chunk data for %s", f.RelPath)
@@ -256,7 +251,13 @@ func Send(ctx context.Context, src, mid transport.Transport, opts SendOptions) e
 				return err
 			}
 			uploaded[c.Digest] = struct{}{}
+			return nil
+		})
+		_ = rc.Close()
+		if err != nil {
+			return err
 		}
+		mf.Digest = sig.Digest
 		man.Files = append(man.Files, mf)
 	}
 

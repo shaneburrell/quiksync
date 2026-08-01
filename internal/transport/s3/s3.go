@@ -378,6 +378,9 @@ func (w *writeSession) ReuseChunk(ctx context.Context, newOffset, oldOffset uint
 	if !w.t.reuse {
 		return fmt.Errorf("s3 reuse not enabled")
 	}
+	if err := transport.ValidateReuseRange(oldOffset, length, -1); err != nil {
+		return err
+	}
 	end := oldOffset + uint64(length) - 1
 	resp, err := w.t.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(w.t.bucket),

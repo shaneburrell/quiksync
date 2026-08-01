@@ -85,15 +85,35 @@ func (o Options) normalized() Options {
 
 // ChunkReader performs FastCDC over r and returns a signature.
 func ChunkReader(r io.Reader, sizeHint int64, opt Options) (FileSignature, error) {
+	keep := opt.KeepData
+	var chunks []Chunk
+	sig, err := streamChunks(r, sizeHint, opt, keep, func(c Chunk) error {
+		chunks = append(chunks, c)
+		return nil
+	})
+	if err != nil {
+		return FileSignature{}, err
+	}
+	sig.Chunks = chunks
+	return sig, nil
+}
+
+// StreamChunks performs FastCDC over r, invoking fn for each chunk with Data set
+// for that call only. The returned FileSignature never retains chunk payloads.
+func StreamChunks(r io.Reader, sizeHint int64, opt Options, fn func(Chunk) error) (FileSignature, error) {
+	return streamChunks(r, sizeHint, opt, true, fn)
+}
+
+func streamChunks(r io.Reader, sizeHint int64, opt Options, copyData bool, fn func(Chunk) error) (FileSignature, error) {
 	opt = opt.normalized()
 	hFile := blake3.New()
 	tr := io.TeeReader(r, hFile)
 
 	mask := maskForAvg(opt.AvgSize)
 	buf := make([]byte, opt.MaxSize)
-	var chunks []Chunk
 	var offset uint64
 	var carry []byte
+	var nChunks int
 
 	for {
 		n, err := readFill(tr, buf[len(carry):])
@@ -124,10 +144,15 @@ func ChunkReader(r io.Reader, sizeHint int64, opt Options) (FileSignature, error
 			data = data[cut:]
 			d := Sum(piece)
 			c := Chunk{Offset: offset, Length: uint32(len(piece)), Digest: d}
-			if opt.KeepData {
+			if copyData {
 				c.Data = append([]byte(nil), piece...)
 			}
-			chunks = append(chunks, c)
+			if fn != nil {
+				if err := fn(c); err != nil {
+					return FileSignature{}, err
+				}
+			}
+			nChunks++
 			offset += uint64(len(piece))
 		}
 		if err == io.EOF {
@@ -144,7 +169,7 @@ func ChunkReader(r io.Reader, sizeHint int64, opt Options) (FileSignature, error
 	if sizeHint > 0 && sizeHint != total {
 		return FileSignature{}, fmt.Errorf("size mismatch: read %d bytes, hint %d", total, sizeHint)
 	}
-	return FileSignature{Size: total, Digest: whole, Chunks: chunks}, nil
+	return FileSignature{Size: total, Digest: whole, Chunks: make([]Chunk, 0, nChunks)}, nil
 }
 
 func readFill(r io.Reader, buf []byte) (int, error) {

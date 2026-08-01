@@ -431,9 +431,6 @@ func (w *writeSession) ReuseChunk(ctx context.Context, newOffset, oldOffset uint
 	if w.old == nil {
 		return fmt.Errorf("reuse: no existing file")
 	}
-	if length < 0 {
-		return fmt.Errorf("reuse: negative length")
-	}
 	st, err := w.t.Stat(ctx, w.userRel)
 	if err != nil {
 		return fmt.Errorf("reuse TOCTOU: %w", err)
@@ -441,8 +438,8 @@ func (w *writeSession) ReuseChunk(ctx context.Context, newOffset, oldOffset uint
 	if st.Size != w.oldSize || st.ModTime.UnixNano() != w.oldMod {
 		return fmt.Errorf("reuse TOCTOU: dest changed")
 	}
-	if int64(oldOffset)+int64(length) > w.oldSize {
-		return fmt.Errorf("reuse: old range out of bounds")
+	if err := transport.ValidateReuseRange(oldOffset, length, w.oldSize); err != nil {
+		return err
 	}
 	piece := make([]byte, length)
 	if _, err := w.old.Seek(int64(oldOffset), io.SeekStart); err != nil {

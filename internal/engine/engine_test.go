@@ -148,6 +148,56 @@ func TestCompressRoundTrip(t *testing.T) {
 	}
 }
 
+func TestTwoPassStreamCopyAndDelta(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+	// ~2 MiB forces multiple CDC chunks; two-pass must not require KeepData on pass 1.
+	data := bytes.Repeat([]byte("two-pass-stream-ABCDEFGHIJKLMNOP\n"), 64*1024)
+	writeFile(t, filepath.Join(src, "big.bin"), data)
+
+	stats, err := engine.Run(context.Background(), engine.Config{
+		Source: src, Dest: dst, Resume: true,
+		Tune: autotune.Config{Enabled: false, Compress: compress.CodecNone, Streams: 1, ChunkAvg: 64 * 1024},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.FilesCopied != 1 {
+		t.Fatalf("copied=%d", stats.FilesCopied)
+	}
+	got, err := os.ReadFile(filepath.Join(dst, "big.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatalf("content mismatch len=%d want=%d", len(got), len(data))
+	}
+
+	// Append so delta reuse path is exercised on the second pass-2 stream.
+	data2 := append(append([]byte{}, data...), []byte("TAIL")...)
+	writeFile(t, filepath.Join(src, "big.bin"), data2)
+	stats2, err := engine.Run(context.Background(), engine.Config{
+		Source: src, Dest: dst, Resume: true, Checksum: true,
+		Tune: autotune.Config{Enabled: false, Compress: compress.CodecNone, Streams: 1, ChunkAvg: 64 * 1024},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats2.FilesCopied != 1 {
+		t.Fatalf("delta copied=%d", stats2.FilesCopied)
+	}
+	if stats2.ChunksReused < 1 {
+		t.Fatalf("expected reuse after append, got %+v", stats2)
+	}
+	got2, err := os.ReadFile(filepath.Join(dst, "big.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got2, data2) {
+		t.Fatal("delta content mismatch")
+	}
+}
+
 func writeFile(t testing.TB, path string, data []byte) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

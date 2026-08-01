@@ -114,17 +114,7 @@ func newNative(ctx context.Context, ep transport.Endpoint) (*Transport, error) {
 }
 
 func newExec(ctx context.Context, ep transport.Endpoint) (*Transport, error) {
-	target := ep.Host
-	if ep.User != "" {
-		target = ep.User + "@" + ep.Host
-	}
-	// -T: no TTY (required for binary remote-helper framing).
-	// BatchMode: never block on interactive password/host-key prompts.
-	args := []string{"-T", "-o", "BatchMode=yes"}
-	if ep.Port != "" {
-		args = append(args, "-p", ep.Port)
-	}
-	args = append(args, target, "quiksync", "remote-helper")
+	args := execArgs(ep)
 	cmd := exec.CommandContext(ctx, Command, args...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -145,6 +135,23 @@ func newExec(ctx context.Context, ep transport.Endpoint) (*Transport, error) {
 	}
 	go func() { _, _ = io.Copy(io.Discard, stderr) }()
 	return &Transport{ep: ep, cmd: cmd, stdin: stdin, stdout: stdout}, nil
+}
+
+// execArgs builds the OpenSSH argv. "--" stops option parsing so a crafted
+// host/user cannot be interpreted as ssh flags (e.g. -oProxyCommand=...).
+func execArgs(ep transport.Endpoint) []string {
+	target := ep.Host
+	if ep.User != "" {
+		target = ep.User + "@" + ep.Host
+	}
+	// -T: no TTY (required for binary remote-helper framing).
+	// BatchMode: never block on interactive password/host-key prompts.
+	args := []string{"-T", "-o", "BatchMode=yes"}
+	if ep.Port != "" {
+		args = append(args, "-p", ep.Port)
+	}
+	args = append(args, "--", target, "quiksync", "remote-helper")
+	return args
 }
 
 func mapCaps(ok protocol.HelloOK) transport.Caps {

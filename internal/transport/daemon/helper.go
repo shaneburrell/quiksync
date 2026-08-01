@@ -259,6 +259,13 @@ func RunRemoteHelperOpts(ctx context.Context, r io.Reader, w io.Writer, opts Hel
 				}
 				continue
 			}
+			// Early reject before session allocate; oldSize unknown at protocol layer.
+			if err := transport.ValidateReuseRange(req.OldOffset, req.Length, -1); err != nil {
+				if err := writeErr(w, err); err != nil {
+					return err
+				}
+				continue
+			}
 			if err := session.ReuseChunk(ctx, req.NewOffset, req.OldOffset, req.Digest, req.Length); err != nil {
 				_ = session.Abort()
 				session = nil
@@ -274,6 +281,12 @@ func RunRemoteHelperOpts(ctx context.Context, r io.Reader, w io.Writer, opts Hel
 			// Wakeup-only: wake local waiters; receivers still verify mid-store state.
 			var meta protocol.RelayNotifyMeta
 			_ = protocol.DecodeJSON(payload, &meta)
+			if err := validateRelayJobID(meta.JobID); err != nil {
+				if err := writeErr(w, err); err != nil {
+					return err
+				}
+				continue
+			}
 			relayWake(meta.JobID)
 			if err := protocol.WriteJSON(w, protocol.MsgOK, protocol.OK{OK: true}); err != nil {
 				return err
@@ -281,6 +294,12 @@ func RunRemoteHelperOpts(ctx context.Context, r io.Reader, w io.Writer, opts Hel
 		case protocol.MsgRelayWait:
 			var meta protocol.RelayNotifyMeta
 			if err := protocol.DecodeJSON(payload, &meta); err != nil {
+				if err := writeErr(w, err); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := validateRelayJobID(meta.JobID); err != nil {
 				if err := writeErr(w, err); err != nil {
 					return err
 				}

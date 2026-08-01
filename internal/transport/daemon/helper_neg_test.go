@@ -3,9 +3,11 @@ package daemon
 import (
 	"context"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/shaneburrell/quiksync/internal/chunk"
 	"github.com/shaneburrell/quiksync/internal/protocol"
 )
 
@@ -64,6 +66,50 @@ func TestHelperNoSessionErrorsThenWalk(t *testing.T) {
 		t.Fatalf("walk after errors: typ=%v err=%v", typ, err)
 	}
 
+	_ = protocol.WriteMsg(clientW, protocol.MsgBye, nil)
+	_ = clientW.Close()
+	select {
+	case <-errCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("helper timeout")
+	}
+}
+
+func TestHelperRejectsHugeReuseLength(t *testing.T) {
+	root := t.TempDir()
+	clientR, serverW := io.Pipe()
+	serverR, clientW := io.Pipe()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- RunRemoteHelperRoot(context.Background(), serverR, serverW, root)
+	}()
+	if err := protocol.WriteJSON(clientW, protocol.MsgHello, protocol.Hello{Version: protocol.ProtocolVersion}); err != nil {
+		t.Fatal(err)
+	}
+	if typ, _, err := protocol.ReadMsg(clientR); err != nil || typ != protocol.MsgHelloOK {
+		t.Fatalf("hello: %v", err)
+	}
+	if err := protocol.WriteJSON(clientW, protocol.MsgBeginWrite, protocol.BeginWriteReq{Rel: "x.bin", Size: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if typ, _, err := protocol.ReadMsg(clientR); err != nil || typ != protocol.MsgOK {
+		t.Fatalf("begin: typ=%v err=%v", typ, err)
+	}
+	huge := int(chunk.DefaultMaxSize) + 1
+	if err := protocol.WriteJSON(clientW, protocol.MsgReuseChunk, protocol.ReuseChunkReq{
+		NewOffset: 0, OldOffset: 0, Length: huge,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	typ, payload, err := protocol.ReadMsg(clientR)
+	if err != nil || typ != protocol.MsgErr {
+		t.Fatalf("want MsgErr, got typ=%v err=%v", typ, err)
+	}
+	var em protocol.ErrMsg
+	_ = protocol.DecodeJSON(payload, &em)
+	if !strings.Contains(em.Error, "exceeds max") {
+		t.Fatalf("err=%q", em.Error)
+	}
 	_ = protocol.WriteMsg(clientW, protocol.MsgBye, nil)
 	_ = clientW.Close()
 	select {
