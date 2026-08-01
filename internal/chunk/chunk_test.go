@@ -2,6 +2,7 @@ package chunk
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -52,6 +53,20 @@ func TestChunkReaderDeterministic(t *testing.T) {
 	}
 	if !bytes.Equal(rebuilt, data) {
 		t.Fatalf("rebuild mismatch: got %d want %d", len(rebuilt), len(data))
+	}
+}
+
+func TestStreamChunksCallbackErrorAndSizeMismatch(t *testing.T) {
+	data := []byte(strings.Repeat("err-path-", 2000))
+	_, err := StreamChunks(bytes.NewReader(data), int64(len(data)), Options{}, func(c Chunk) error {
+		return fmt.Errorf("stop")
+	})
+	if err == nil || !strings.Contains(err.Error(), "stop") {
+		t.Fatalf("callback err: %v", err)
+	}
+	_, err = StreamChunks(bytes.NewReader(data), int64(len(data))+10, Options{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "size mismatch") {
+		t.Fatalf("size mismatch: %v", err)
 	}
 }
 

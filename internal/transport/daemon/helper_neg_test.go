@@ -75,6 +75,53 @@ func TestHelperNoSessionErrorsThenWalk(t *testing.T) {
 	}
 }
 
+func TestHelperRejectsLongRelayJobID(t *testing.T) {
+	root := t.TempDir()
+	clientR, serverW := io.Pipe()
+	serverR, clientW := io.Pipe()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- RunRemoteHelperRoot(context.Background(), serverR, serverW, root)
+	}()
+	if err := protocol.WriteJSON(clientW, protocol.MsgHello, protocol.Hello{Version: protocol.ProtocolVersion}); err != nil {
+		t.Fatal(err)
+	}
+	if typ, _, err := protocol.ReadMsg(clientR); err != nil || typ != protocol.MsgHelloOK {
+		t.Fatalf("hello: %v", err)
+	}
+	long := strings.Repeat("j", relayMaxJobIDLen+1)
+	if err := protocol.WriteJSON(clientW, protocol.MsgRelayWait, protocol.RelayNotifyMeta{JobID: long}); err != nil {
+		t.Fatal(err)
+	}
+	typ, payload, err := protocol.ReadMsg(clientR)
+	if err != nil || typ != protocol.MsgErr {
+		t.Fatalf("want MsgErr, got typ=%v err=%v", typ, err)
+	}
+	var em protocol.ErrMsg
+	_ = protocol.DecodeJSON(payload, &em)
+	if !strings.Contains(em.Error, "too long") {
+		t.Fatalf("err=%q", em.Error)
+	}
+	if err := protocol.WriteJSON(clientW, protocol.MsgRelayNotify, protocol.RelayNotifyMeta{JobID: long}); err != nil {
+		t.Fatal(err)
+	}
+	typ, payload, err = protocol.ReadMsg(clientR)
+	if err != nil || typ != protocol.MsgErr {
+		t.Fatalf("notify want MsgErr, got typ=%v err=%v", typ, err)
+	}
+	_ = protocol.DecodeJSON(payload, &em)
+	if !strings.Contains(em.Error, "too long") {
+		t.Fatalf("notify err=%q", em.Error)
+	}
+	_ = protocol.WriteMsg(clientW, protocol.MsgBye, nil)
+	_ = clientW.Close()
+	select {
+	case <-errCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("helper timeout")
+	}
+}
+
 func TestHelperRejectsHugeReuseLength(t *testing.T) {
 	root := t.TempDir()
 	clientR, serverW := io.Pipe()

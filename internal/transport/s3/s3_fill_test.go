@@ -141,6 +141,25 @@ func TestS3WriteReuseAfterCommit(t *testing.T) {
 	}
 }
 
+func TestS3ReuseRejectsHugeLength(t *testing.T) {
+	ctx := context.Background()
+	mem := NewMemory()
+	tr, err := New(ctx, transport.Endpoint{Scheme: "s3", Host: "b", Path: ""}, Options{Client: mem, StagingDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tr.Close() }()
+	ws, err := tr.BeginWrite(ctx, "h.bin", 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ws.Abort() }()
+	huge := int(chunk.DefaultMaxSize) + 1
+	if err := ws.ReuseChunk(ctx, 0, 0, chunk.Digest{}, huge); err == nil || !strings.Contains(err.Error(), "exceeds max") {
+		t.Fatalf("expected max reject, got %v", err)
+	}
+}
+
 func TestS3ReuseDigestMismatchAndWalkExclude(t *testing.T) {
 	ctx := context.Background()
 	mem := NewMemory()
