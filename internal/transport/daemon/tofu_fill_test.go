@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -27,8 +28,10 @@ func TestTOFUPinningLifecycle(t *testing.T) {
 	if _, err := os.Stat(certFile); err != nil {
 		t.Fatal(err)
 	}
-	if st, err := os.Stat(keyFile); err != nil || st.Mode().Perm() != 0o600 {
-		t.Fatalf("key mode=%v err=%v", st.Mode(), err)
+	if st, err := os.Stat(keyFile); err != nil {
+		t.Fatalf("key stat: %v", err)
+	} else if runtime.GOOS != "windows" && st.Mode().Perm() != 0o600 {
+		t.Fatalf("key mode=%v want 0600", st.Mode())
 	}
 	// Exercise the existing-certificate and explicit-certificate paths too.
 	if _, err := loadOrCreatePinnedTLS("", ""); err != nil {

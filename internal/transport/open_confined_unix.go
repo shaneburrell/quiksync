@@ -19,7 +19,7 @@ func openConfinedPath(absRoot, cleanedRel string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer unix.Close(rootFD)
+	defer func() { _ = unix.Close(rootFD) }()
 
 	parts := strings.Split(cleanedRel, string(filepath.Separator))
 	var comps []string

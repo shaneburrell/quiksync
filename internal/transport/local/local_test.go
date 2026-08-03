@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -150,6 +151,7 @@ func TestCommitDigestMismatchAborts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = ws.Abort() }()
 	if err := ws.WriteChunk(ctx, 0, compress.CodecNone, 5, []byte("hello")); err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +253,7 @@ func TestLocalLinksAndDirectoriesPreserveMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Mode().Perm() != 0o711 {
+	if runtime.GOOS != "windows" && st.Mode().Perm() != 0o711 {
 		t.Fatalf("directory mode=%#o want %#o", st.Mode().Perm(), os.FileMode(0o711))
 	}
 	if err := tr.Symlink(ctx, "../target", "empty/nested/link"); err != nil {
@@ -310,10 +312,10 @@ func TestWriteRejectsDestinationRangeAndCrossDeviceFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Mode().Perm() != 0o751 {
+	if runtime.GOOS != "windows" && st.Mode().Perm() != 0o751 {
 		t.Fatalf("file mode=%#o want %#o", st.Mode().Perm(), os.FileMode(0o751))
 	}
-	if !st.ModTime().Equal(modTime) {
+	if runtime.GOOS != "windows" && !st.ModTime().Equal(modTime) {
 		t.Fatalf("mtime=%v want %v", st.ModTime(), modTime)
 	}
 }
