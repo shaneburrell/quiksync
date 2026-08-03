@@ -263,7 +263,7 @@ func TestLocalLinksAndDirectoriesPreserveMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if target != "../target" {
+	if filepath.ToSlash(target) != "../target" {
 		t.Fatalf("target=%q", target)
 	}
 	// Replacing an existing link must not leave the old target behind.

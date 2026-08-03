@@ -2,8 +2,13 @@ package ssh
 
 import (
 	"bytes"
+	"context"
+	"os"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/shaneburrell/quiksync/internal/chunk"
 	"github.com/shaneburrell/quiksync/internal/protocol"
 	"github.com/shaneburrell/quiksync/internal/transport"
 )
@@ -28,6 +33,10 @@ func TestMapCaps(t *testing.T) {
 	if tr.Root() != "/tmp/qs" {
 		t.Fatalf("Root %q", tr.Root())
 	}
+	tr.root = "/remote/root"
+	if tr.Root() != "/remote/root" {
+		t.Fatalf("explicit Root %q", tr.Root())
+	}
 }
 
 func transportEndpoint() transport.Endpoint {
@@ -43,11 +52,45 @@ func TestRemoteErrAndExpectOK(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
+	err = remoteErr(protocol.MsgErr, []byte(`not-json`))
+	if err == nil || err.Error() != "remote error (invalid or empty error response)" {
+		t.Fatalf("invalid remote error: %v", err)
+	}
 	var buf bytes.Buffer
 	if err := protocol.WriteJSON(&buf, protocol.MsgOK, protocol.OK{OK: true}); err != nil {
 		t.Fatal(err)
 	}
 	if err := expectOK(&buf); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestWriteSessionRejectsOperationsAfterCompletion(t *testing.T) {
+	w := &writeSession{committed: true}
+	if err := w.WriteChunk(context.Background(), 0, 0, 0, nil); err == nil {
+		t.Fatal("expected completed write rejection")
+	}
+	if err := w.ReuseChunk(context.Background(), 0, 0, chunk.Digest{}, 0); err == nil {
+		t.Fatal("expected completed reuse rejection")
+	}
+	if err := w.Commit(context.Background(), chunk.Digest{}, os.FileMode(0), time.Time{}); err != nil {
+		t.Fatalf("completed commit: %v", err)
+	}
+	if err := w.Abort(); err != nil {
+		t.Fatalf("completed abort: %v", err)
+	}
+}
+
+func TestLockContextHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var mu sync.Mutex
+	if err := lockContext(ctx, &mu); err != context.Canceled {
+		t.Fatalf("unlocked cancelled context: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if err := lockContext(ctx, &mu); err != context.Canceled {
+		t.Fatalf("locked cancelled context: %v", err)
 	}
 }

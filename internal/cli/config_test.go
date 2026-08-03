@@ -73,3 +73,30 @@ func TestBuildConfig(t *testing.T) {
 		t.Fatalf("expected no log, got %q", cfg2.LogFile)
 	}
 }
+
+func TestBuildConfigDefaultsAndValidation(t *testing.T) {
+	t.Setenv("QUIKSYNC_CONFIG", t.TempDir())
+	t.Setenv("QUIKSYNC_AUTH_TOKEN", "from-env")
+
+	cfg, err := buildConfig("/src", "/dst", TransferFlags{
+		Compress: "none",
+		NoLog:    true,
+		Streams:  99,
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.JobID != "default" || cfg.AuthToken != "from-env" || cfg.Tune.Streams != 32 {
+		t.Fatalf("defaults not applied: %+v", cfg)
+	}
+	if _, err := buildConfig("/src", "/dst", TransferFlags{
+		Compress: "none", NoLog: true, ChunkSize: "not-a-size",
+	}, false); err == nil {
+		t.Fatal("expected invalid chunk size")
+	}
+	if _, err := buildConfig("/src", "/dst", TransferFlags{
+		Compress: "none", NoLog: true, BandwidthLimit: -1,
+	}, false); err == nil {
+		t.Fatal("expected negative bandwidth limit")
+	}
+}
