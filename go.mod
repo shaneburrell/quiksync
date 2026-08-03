@@ -13,6 +13,7 @@ require (
 	github.com/vmware/go-nfs-client v0.0.0-20190605212624-d43b92724c1b
 	github.com/zeebo/blake3 v0.2.4
 	golang.org/x/crypto v0.54.0
+	golang.org/x/sys v0.47.0
 )
 
 require (
@@ -36,5 +37,4 @@ require (
 	github.com/rasky/go-xdr v0.0.0-20170124162913-1a41d1a06c93 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	golang.org/x/net v0.57.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
 )

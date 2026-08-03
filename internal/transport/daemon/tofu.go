@@ -140,7 +140,29 @@ func verifyTOFU(hostport string, insecure bool) func(cs tls.ConnectionState) err
 			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 				return err
 			}
-			return os.WriteFile(path, []byte(fp+"\n"), 0o644)
+			// Atomic first-pin: O_EXCL so concurrent first connects cannot race.
+			f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+			if err != nil {
+				if !os.IsExist(err) {
+					return err
+				}
+				// Lost the race — re-read and verify against the winner's pin.
+				b, err = os.ReadFile(path)
+				if err != nil {
+					return err
+				}
+				stored := strings.TrimSpace(string(b))
+				if stored != fp {
+					return fmt.Errorf("TOFU pin mismatch for %s: got %s want %s (delete pin or use --insecure)", hostport, fp, stored)
+				}
+				return nil
+			}
+			_, werr := f.Write([]byte(fp + "\n"))
+			cerr := f.Close()
+			if werr != nil {
+				return werr
+			}
+			return cerr
 		}
 		stored := strings.TrimSpace(string(b))
 		if stored != fp {

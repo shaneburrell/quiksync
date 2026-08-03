@@ -23,7 +23,7 @@ Generated coverage, benches, and soak reports land in `testdata/artifacts/` (git
 |---------|---------|
 | `make fmt` | Format with gofmt/goimports |
 | `make lint` | golangci-lint (errcheck, staticcheck, revive, …) |
-| `make check` | Full local gate: tidy, fmt, vet, lint, race, coverage ≥70% |
+| `make check` | Full local gate: tidy, fmt, vet, lint, race, coverage ≥80% |
 | `make cover` | Coverage HTML + threshold |
 | `make bench` | Microbenchmarks |
 | `make test-efficiency` | Longer goodput/delta/bwlimit soak report |

@@ -20,6 +20,17 @@ func TestReadWriteMsg(t *testing.T) {
 	}
 }
 
+func TestWriteMsgRejectsOversizedPayload(t *testing.T) {
+	payload := make([]byte, maxMessageBytes+1)
+	var buf bytes.Buffer
+	if err := WriteMsg(&buf, MsgOK, payload); err == nil {
+		t.Fatal("expected oversized message rejection")
+	}
+	if buf.Len() != 0 {
+		t.Fatal("oversized message must not write a partial header")
+	}
+}
+
 func TestWriteJSON(t *testing.T) {
 	var buf bytes.Buffer
 	if err := WriteJSON(&buf, MsgHello, Hello{Version: "1", Root: "/tmp"}); err != nil {
@@ -54,7 +65,7 @@ func TestCheckPeerVersion(t *testing.T) {
 
 func TestDefaultCaps(t *testing.T) {
 	c := DefaultCaps()
-	if !c.SupportsDelta || !c.SupportsMultiplex || !c.SupportsResume || !c.SupportsReuseChunk {
+	if !c.SupportsDelta || c.SupportsMultiplex || !c.SupportsResume || !c.SupportsReuseChunk {
 		t.Fatalf("%+v", c)
 	}
 }

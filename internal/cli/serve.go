@@ -28,8 +28,12 @@ func newServeCmd() *cobra.Command {
 				AuthToken:   authToken,
 				AllowNoAuth: allowNoAuth,
 			}
-			fmt.Fprintf(os.Stderr, "quiksync serve listening on %s (root=%s)\n", listen, root)
-			return daemon.Serve(context.Background(), cfg)
+			ctx := cmd.Context()
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			fmt.Fprintf(os.Stderr, "quiksync serve starting on %s (root=%s)\n", listen, root)
+			return daemon.Serve(ctx, cfg)
 		},
 	}
 	cmd.Flags().StringVar(&listen, "listen", "127.0.0.1:4242", "listen address (default loopback)")
@@ -47,7 +51,15 @@ func newRemoteHelperCmd() *cobra.Command {
 		Short:  "Stdio remote helper (invoked over SSH)",
 		Hidden: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return daemon.RunRemoteHelper(context.Background(), os.Stdin, os.Stdout)
+			ctx := cmd.Context()
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			opts := daemon.HelperOptions{}
+			if tok := os.Getenv("QUIKSYNC_AUTH_TOKEN"); tok != "" {
+				opts.AuthToken = tok
+			}
+			return daemon.RunRemoteHelperOpts(ctx, os.Stdin, os.Stdout, opts)
 		},
 	}
 }

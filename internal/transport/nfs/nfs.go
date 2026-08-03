@@ -189,7 +189,9 @@ func (t *Transport) userRel(mountRel string) string {
 }
 
 func (t *Transport) Walk(ctx context.Context, exclude []string) ([]transport.FileMeta, error) {
-	_ = ctx
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	var out []transport.FileMeta
 	start := t.base
 	err := t.walkDir(start, &out, exclude)
@@ -248,7 +250,9 @@ func matchExclude(rel string, patterns []string) bool {
 }
 
 func (t *Transport) Stat(ctx context.Context, rel string) (transport.FileMeta, error) {
-	_ = ctx
+	if err := ctx.Err(); err != nil {
+		return transport.FileMeta{}, err
+	}
 	userRel := rel
 	mountRel, err := t.joinBase(rel)
 	if err != nil {
@@ -267,7 +271,9 @@ func (t *Transport) Stat(ctx context.Context, rel string) (transport.FileMeta, e
 }
 
 func (t *Transport) OpenRead(ctx context.Context, rel string) (io.ReadCloser, error) {
-	_ = ctx
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	mountRel, err := t.joinBase(rel)
 	if err != nil {
 		return nil, err
@@ -276,7 +282,9 @@ func (t *Transport) OpenRead(ctx context.Context, rel string) (io.ReadCloser, er
 }
 
 func (t *Transport) Remove(ctx context.Context, rel string) error {
-	_ = ctx
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	mountRel, err := t.joinBase(rel)
 	if err != nil {
 		return err
@@ -285,7 +293,9 @@ func (t *Transport) Remove(ctx context.Context, rel string) error {
 }
 
 func (t *Transport) MkdirAll(ctx context.Context, rel string) error {
-	_ = ctx
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	mountRel, err := t.joinBase(rel)
 	if err != nil {
 		return err
@@ -412,6 +422,9 @@ func (w *writeSession) WriteChunk(ctx context.Context, offset uint64, codec comp
 	if err != nil {
 		return err
 	}
+	if err := transport.ValidateWriteRange(offset, len(raw), w.size); err != nil {
+		return err
+	}
 	if _, err := w.staging.Seek(int64(offset), io.SeekStart); err != nil {
 		return err
 	}
@@ -439,6 +452,9 @@ func (w *writeSession) ReuseChunk(ctx context.Context, newOffset, oldOffset uint
 		return fmt.Errorf("reuse TOCTOU: dest changed")
 	}
 	if err := transport.ValidateReuseRange(oldOffset, length, w.oldSize); err != nil {
+		return err
+	}
+	if err := transport.ValidateWriteRange(newOffset, length, w.size); err != nil {
 		return err
 	}
 	piece := make([]byte, length)

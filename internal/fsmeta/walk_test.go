@@ -27,7 +27,7 @@ func TestWalkExcludeAndSkipQuiksync(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 1 || files[0].RelPath != "keep.txt" {
+	if len(files) != 2 || files[0].RelPath != "keep.txt" || files[1].RelPath != "logs" || !files[1].IsDir {
 		t.Fatalf("files=%v", files)
 	}
 }
@@ -51,8 +51,8 @@ func TestWalkSkipsNestedQuiksyncTmp(t *testing.T) {
 	if !got["a/real.txt"] || !got["b/c/ok.txt"] {
 		t.Fatalf("missing expected files: %v", got)
 	}
-	if len(files) != 2 {
-		t.Fatalf("want 2 files, got %v", got)
+	if len(files) != 5 {
+		t.Fatalf("want 2 files and 3 directories, got %v", got)
 	}
 	for p := range got {
 		if filepath.Base(filepath.Dir(p)) == ".quiksync.tmp" || filepath.Base(filepath.Dir(p)) == ".quiksync" {

@@ -43,6 +43,19 @@ jobs:
           go test -timeout 3m -fuzz=FuzzChunkReader -fuzztime=10s ./internal/chunk/
           go test -timeout 3m -fuzz=FuzzReadWriteMsg -fuzztime=5s ./internal/protocol/
 
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      - name: Test
+        run: go test ./...
+      - name: Vet
+        run: go vet ./...
+
   build-matrix:
     runs-on: ubuntu-latest
     strategy:

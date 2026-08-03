@@ -16,6 +16,8 @@ func newSendCmd() *cobra.Command {
 	var via, signal, jobID, authToken, s3Endpoint, s3Region string
 	var insecure bool
 	var ttl time.Duration
+	var exclude []string
+	var chunkSize string
 	cmd := &cobra.Command{
 		Use:   "send SRC --via MID",
 		Short: "Publish a tree to a mid-hop store (S3/NFS/file)",
@@ -41,19 +43,28 @@ func newSendCmd() *cobra.Command {
 			}
 			opts := transport.OpenOptions{
 				Insecure: insecure, AuthToken: authToken,
-				S3Endpoint: s3Endpoint, S3Region: s3Region,
+				S3Endpoint: s3Endpoint, S3Region: s3Region, CreateRoot: false,
 			}
 			src, err := factory.Open(ctx, srcEP, opts)
 			if err != nil {
 				return err
 			}
 			defer func() { _ = src.Close() }()
-			mid, err := factory.Open(ctx, midEP, opts)
+			midOpts := opts
+			midOpts.CreateRoot = true
+			mid, err := factory.Open(ctx, midEP, midOpts)
 			if err != nil {
 				return err
 			}
 			defer func() { _ = mid.Close() }()
-			sendOpts := relay.SendOptions{JobID: jobID, TTL: ttl}
+			sendOpts := relay.SendOptions{JobID: jobID, TTL: ttl, Exclude: exclude}
+			if chunkSize != "" {
+				n, err := parseSize(chunkSize)
+				if err != nil {
+					return err
+				}
+				sendOpts.ChunkAvg = uint32(n)
+			}
 			if signal != "" {
 				sigEP, err := transport.ParseEndpoint(signal)
 				if err != nil {
@@ -68,6 +79,8 @@ func newSendCmd() *cobra.Command {
 	cmd.Flags().StringVar(&signal, "signal", "", "optional quiksync:// or ssh wakeup endpoint")
 	cmd.Flags().StringVar(&jobID, "job-id", "default", "relay job id")
 	cmd.Flags().DurationVar(&ttl, "ttl", 24*time.Hour, "lease TTL")
+	cmd.Flags().StringSliceVar(&exclude, "exclude", nil, "exclude glob patterns (same as copy/sync)")
+	cmd.Flags().StringVar(&chunkSize, "chunk-size", "", "target CDC average chunk size (e.g. 64K)")
 	cmd.Flags().BoolVar(&insecure, "insecure", false, "skip QUIC TOFU (labs)")
 	cmd.Flags().StringVar(&authToken, "auth-token", "", "QUIC auth token")
 	cmd.Flags().StringVar(&s3Endpoint, "s3-endpoint", "", "S3-compatible endpoint URL (MinIO/R2)")
@@ -112,7 +125,9 @@ func newRecvCmd() *cobra.Command {
 				return err
 			}
 			defer func() { _ = mid.Close() }()
-			dst, err := factory.Open(ctx, dstEP, opts)
+			dstOpts := opts
+			dstOpts.CreateRoot = true
+			dst, err := factory.Open(ctx, dstEP, dstOpts)
 			if err != nil {
 				return err
 			}

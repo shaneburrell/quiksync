@@ -260,10 +260,12 @@ func (t *Transport) Remove(ctx context.Context, rel string) error {
 	if err != nil {
 		return err
 	}
-	_, _ = t.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+	if _, err := t.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(t.bucket),
 		Key:    aws.String(t.sigKey(rel)),
-	})
+	}); err != nil && !isNotFound(err) {
+		return fmt.Errorf("delete signature sidecar: %w", err)
+	}
 	return nil
 }
 
@@ -288,7 +290,10 @@ func (t *Transport) GetSignature(ctx context.Context, rel string) (chunk.FileSig
 	}
 	rc, err := t.OpenRead(ctx, rel)
 	if err != nil {
-		return chunk.FileSignature{}, nil // missing
+		if isNotFound(err) {
+			return chunk.FileSignature{}, nil // missing
+		}
+		return chunk.FileSignature{}, err
 	}
 	defer func() { _ = rc.Close() }()
 	st, err := t.Stat(ctx, rel)
@@ -296,6 +301,18 @@ func (t *Transport) GetSignature(ctx context.Context, rel string) (chunk.FileSig
 		return chunk.FileSignature{}, err
 	}
 	return chunk.ChunkReader(rc, st.Size, chunk.Options{})
+}
+
+func isNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "notfound") ||
+		strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "nosuchkey") ||
+		strings.Contains(msg, "no such key") ||
+		strings.Contains(msg, "404")
 }
 
 // sidecarBoundToObject reports whether the sidecar still matches the live object
@@ -331,6 +348,9 @@ type writeSession struct {
 	tempPath  string
 	committed bool
 	mu        sync.Mutex
+	hasOld    bool
+	oldSize   int64
+	oldETag   string
 }
 
 func (t *Transport) BeginWrite(ctx context.Context, rel string, size int64) (transport.WriteSession, error) {
@@ -345,14 +365,23 @@ func (t *Transport) BeginWrite(ctx context.Context, rel string, size int64) (tra
 			return nil, err
 		}
 	}
-	return &writeSession{
+	ws := &writeSession{
 		t:        t,
 		rel:      rel,
 		finalKey: t.key(rel),
 		size:     size,
 		f:        tmp,
 		tempPath: tmp.Name(),
-	}, nil
+	}
+	if head, err := t.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(t.bucket),
+		Key:    aws.String(ws.finalKey),
+	}); err == nil {
+		ws.hasOld = true
+		ws.oldSize = aws.ToInt64(head.ContentLength)
+		ws.oldETag = aws.ToString(head.ETag)
+	}
+	return ws, nil
 }
 
 func (w *writeSession) WriteChunk(ctx context.Context, offset uint64, codec compress.Codec, uncompressedLen int, data []byte) error {
@@ -365,8 +394,28 @@ func (w *writeSession) WriteChunk(ctx context.Context, offset uint64, codec comp
 	if err != nil {
 		return err
 	}
+	if err := transport.ValidateWriteRange(offset, len(raw), w.size); err != nil {
+		return err
+	}
 	_, err = w.f.WriteAt(raw, int64(offset))
 	return err
+}
+
+func (w *writeSession) checkOldUnchanged(ctx context.Context) error {
+	if !w.hasOld {
+		return fmt.Errorf("s3 reuse: no existing object")
+	}
+	head, err := w.t.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(w.t.bucket),
+		Key:    aws.String(w.finalKey),
+	})
+	if err != nil {
+		return fmt.Errorf("s3 reuse TOCTOU: %w", err)
+	}
+	if aws.ToInt64(head.ContentLength) != w.oldSize || aws.ToString(head.ETag) != w.oldETag {
+		return fmt.Errorf("s3 reuse TOCTOU: object changed during write")
+	}
+	return nil
 }
 
 func (w *writeSession) ReuseChunk(ctx context.Context, newOffset, oldOffset uint64, digest chunk.Digest, length int) error {
@@ -378,7 +427,17 @@ func (w *writeSession) ReuseChunk(ctx context.Context, newOffset, oldOffset uint
 	if !w.t.reuse {
 		return fmt.Errorf("s3 reuse not enabled")
 	}
-	if err := transport.ValidateReuseRange(oldOffset, length, -1); err != nil {
+	oldSize := int64(-1)
+	if w.hasOld {
+		oldSize = w.oldSize
+	}
+	if err := transport.ValidateReuseRange(oldOffset, length, oldSize); err != nil {
+		return err
+	}
+	if err := transport.ValidateWriteRange(newOffset, length, w.size); err != nil {
+		return err
+	}
+	if err := w.checkOldUnchanged(ctx); err != nil {
 		return err
 	}
 	end := oldOffset + uint64(length) - 1

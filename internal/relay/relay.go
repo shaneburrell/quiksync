@@ -18,7 +18,16 @@ import (
 	"github.com/shaneburrell/quiksync/internal/transport"
 )
 
-const schemaVersion = 1
+const (
+	schemaVersion = 1
+
+	// Caps for untrusted mid-store JSON / CA objects.
+	maxJSONBytes      = 32 << 20 // 32 MiB manifests/leases/acks
+	maxNotifyBytes    = 64 << 10 // 64 KiB notify markers
+	maxObjectBytes    = compress.MaxUncompressedChunk
+	maxChunkLength    = uint32(compress.MaxUncompressedChunk)
+	leaseRefreshEvery = 32 // rewrite lease every N uploaded files
+)
 
 // Manifest describes a published mid-hop job.
 type Manifest struct {
@@ -148,12 +157,12 @@ func (s StoreSignal) pollOnce(ctx context.Context, jobID string) (NotifyMeta, bo
 	rc, err := s.Mid.OpenRead(ctx, p.notify())
 	if err == nil {
 		var meta NotifyMeta
-		decErr := json.NewDecoder(rc).Decode(&meta)
+		decErr := decodeJSONLimited(rc, &meta, maxNotifyBytes)
 		_ = rc.Close()
 		if decErr == nil {
 			return meta, true, nil
 		}
-		// Corrupt notify: keep polling; manifest may still be valid.
+		// Corrupt/oversized notify: keep polling; manifest may still be valid.
 	} else if !isAbsent(err) {
 		return NotifyMeta{}, false, fmt.Errorf("poll notify: %w", err)
 	}
@@ -208,11 +217,7 @@ func Send(ctx context.Context, src, mid transport.Transport, opts SendOptions) e
 		JobID: opts.JobID, SenderID: opts.SenderID, Generation: now.UnixNano(),
 		TTLSeconds: int64(opts.TTL / time.Second), CreatedAt: now, ExpiresAt: now.Add(opts.TTL),
 	}
-	body, err := json.Marshal(lease)
-	if err != nil {
-		return err
-	}
-	if err := putBytes(ctx, mid, p.lease(), body); err != nil {
+	if err := writeLease(ctx, mid, p, lease); err != nil {
 		return err
 	}
 
@@ -222,6 +227,7 @@ func Send(ctx context.Context, src, mid transport.Transport, opts SendOptions) e
 	}
 	man := Manifest{SchemaVersion: schemaVersion, JobID: opts.JobID, CreatedAt: now}
 	uploaded := map[chunk.Digest]struct{}{}
+	filesDone := 0
 
 	for _, f := range files {
 		if err := ctx.Err(); err != nil {
@@ -259,6 +265,19 @@ func Send(ctx context.Context, src, mid transport.Transport, opts SendOptions) e
 		}
 		mf.Digest = sig.Digest
 		man.Files = append(man.Files, mf)
+		filesDone++
+		if filesDone%leaseRefreshEvery == 0 {
+			lease.ExpiresAt = time.Now().UTC().Add(opts.TTL)
+			if err := writeLease(ctx, mid, p, lease); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Extend lease through publish so slow uploads cannot expire before recv.
+	lease.ExpiresAt = time.Now().UTC().Add(opts.TTL)
+	if err := writeLease(ctx, mid, p, lease); err != nil {
+		return err
 	}
 
 	manBody, err := json.Marshal(man)
@@ -270,11 +289,23 @@ func Send(ctx context.Context, src, mid transport.Transport, opts SendOptions) e
 	}
 	storeSig := StoreSignal{Mid: mid}
 	meta := NotifyMeta{JobID: opts.JobID, Generation: lease.Generation}
-	_ = storeSig.Notify(ctx, opts.JobID, meta)
+	if err := storeSig.Notify(ctx, opts.JobID, meta); err != nil {
+		return fmt.Errorf("store notify: %w", err)
+	}
 	if opts.Signal != nil {
-		_ = opts.Signal.Notify(ctx, opts.JobID, meta)
+		if err := opts.Signal.Notify(ctx, opts.JobID, meta); err != nil {
+			return fmt.Errorf("signal notify: %w", err)
+		}
 	}
 	return nil
+}
+
+func writeLease(ctx context.Context, mid transport.Transport, p jobPaths, lease Lease) error {
+	body, err := json.Marshal(lease)
+	if err != nil {
+		return err
+	}
+	return putBytes(ctx, mid, p.lease(), body)
 }
 
 // RecvOptions configures relay receive.
@@ -303,10 +334,11 @@ func Recv(ctx context.Context, mid, dest transport.Transport, opts RecvOptions) 
 
 	p := paths(opts.JobID)
 	var lease Lease
-	if err := getJSON(ctx, mid, p.lease(), &lease); err == nil {
-		if !lease.ExpiresAt.IsZero() && time.Now().UTC().After(lease.ExpiresAt) {
-			return fmt.Errorf("lease expired for job %s", opts.JobID)
-		}
+	if err := getJSON(ctx, mid, p.lease(), &lease); err != nil {
+		return fmt.Errorf("read lease: %w", err)
+	}
+	if !lease.ExpiresAt.IsZero() && time.Now().UTC().After(lease.ExpiresAt) {
+		return fmt.Errorf("lease expired for job %s", opts.JobID)
 	}
 	var man Manifest
 	if err := getJSON(ctx, mid, p.manifest(), &man); err != nil {
@@ -315,19 +347,78 @@ func Recv(ctx context.Context, mid, dest transport.Transport, opts RecvOptions) 
 	if err := validateManifest(opts.JobID, &man); err != nil {
 		return fmt.Errorf("invalid manifest: %w", err)
 	}
-	ok := 0
-	for _, f := range man.Files {
-		if err := materialize(ctx, mid, dest, p, f); err != nil {
-			return err
+
+	// Stage under a job-private prefix so a mid-job failure does not leave a
+	// half-updated destination. Promote only after every file succeeds.
+	stagingRoot := path.Join(".quiksync/recv-staging", opts.JobID)
+	defer func() { _ = removeTree(ctx, dest, stagingRoot, man.Files) }()
+
+	for i, f := range man.Files {
+		staged := f
+		staged.RelPath = path.Join(stagingRoot, f.RelPath)
+		if err := materialize(ctx, mid, dest, p, staged); err != nil {
+			return fmt.Errorf("stage file[%d] %s: %w", i, f.RelPath, err)
 		}
-		ok++
 	}
+	for i, f := range man.Files {
+		if err := promoteStaged(ctx, dest, path.Join(stagingRoot, f.RelPath), f); err != nil {
+			return fmt.Errorf("promote file[%d] %s: %w", i, f.RelPath, err)
+		}
+	}
+	ok := len(man.Files)
 	ack := Ack{JobID: opts.JobID, CompletedAt: time.Now().UTC(), FilesOK: ok}
 	ackBody, err := json.Marshal(ack)
 	if err != nil {
 		return err
 	}
 	return putBytes(ctx, mid, p.ack(), ackBody)
+}
+
+func promoteStaged(ctx context.Context, dest transport.Transport, stagedRel string, f ManifestFile) error {
+	rc, err := dest.OpenRead(ctx, stagedRel)
+	if err != nil {
+		return err
+	}
+	data, err := io.ReadAll(io.LimitReader(rc, f.Size+1))
+	_ = rc.Close()
+	if err != nil {
+		return err
+	}
+	if int64(len(data)) != f.Size {
+		return fmt.Errorf("staged size %d != %d", len(data), f.Size)
+	}
+	if got := chunk.Sum(data); got != f.Digest {
+		return fmt.Errorf("staged digest mismatch for %s", f.RelPath)
+	}
+	if dir := path.Dir(f.RelPath); dir != "" && dir != "." {
+		if err := dest.MkdirAll(ctx, dir); err != nil {
+			return err
+		}
+	}
+	ws, err := dest.BeginWrite(ctx, f.RelPath, f.Size)
+	if err != nil {
+		return err
+	}
+	if err := ws.WriteChunk(ctx, 0, compress.CodecNone, len(data), data); err != nil {
+		_ = ws.Abort()
+		return err
+	}
+	if err := ws.Commit(ctx, f.Digest, os.FileMode(f.Mode), time.Unix(0, f.ModNano)); err != nil {
+		_ = ws.Abort()
+		return err
+	}
+	_ = dest.Remove(ctx, stagedRel)
+	return nil
+}
+
+func removeTree(ctx context.Context, dest transport.Transport, stagingRoot string, files []ManifestFile) error {
+	var first error
+	for _, f := range files {
+		if err := dest.Remove(ctx, path.Join(stagingRoot, f.RelPath)); err != nil && !isAbsent(err) && first == nil {
+			first = err
+		}
+	}
+	return first
 }
 
 // waitForJob polls the mid store and optionally wakes early via Signal.
@@ -426,6 +517,9 @@ func validateManifestFile(f ManifestFile) error {
 		if c.Length == 0 {
 			return fmt.Errorf("chunk[%d]: zero length", i)
 		}
+		if c.Length > maxChunkLength {
+			return fmt.Errorf("chunk[%d]: length %d exceeds max %d", i, c.Length, maxChunkLength)
+		}
 		next += uint64(c.Length)
 	}
 	if int64(next) != f.Size {
@@ -467,7 +561,7 @@ func materialize(ctx context.Context, mid, dest transport.Transport, p jobPaths,
 	canReuse := dest.Caps().SupportsReuseChunk && len(destSig.Chunks) > 0
 	for _, c := range f.Chunks {
 		if _, miss := missing[c.Digest]; miss || len(destSig.Chunks) == 0 {
-			data, err := readObject(ctx, mid, p.object(c.Digest), c.Digest)
+			data, err := readObject(ctx, mid, p.object(c.Digest), c.Digest, int64(c.Length))
 			if err != nil {
 				return err
 			}
@@ -483,7 +577,7 @@ func materialize(ctx context.Context, mid, dest transport.Transport, p jobPaths,
 			}
 			continue
 		}
-		data, err := readObject(ctx, mid, p.object(c.Digest), c.Digest)
+		data, err := readObject(ctx, mid, p.object(c.Digest), c.Digest, int64(c.Length))
 		if err != nil {
 			return err
 		}
@@ -498,15 +592,21 @@ func materialize(ctx context.Context, mid, dest transport.Transport, p jobPaths,
 	return nil
 }
 
-func readObject(ctx context.Context, mid transport.Transport, rel string, want chunk.Digest) ([]byte, error) {
+func readObject(ctx context.Context, mid transport.Transport, rel string, want chunk.Digest, wantLen int64) ([]byte, error) {
+	if wantLen <= 0 || wantLen > int64(maxObjectBytes) {
+		return nil, fmt.Errorf("object length %d out of range for digest %s", wantLen, want)
+	}
 	rc, err := mid.OpenRead(ctx, rel)
 	if err != nil {
 		return nil, fmt.Errorf("fetch object %s: %w", want, err)
 	}
-	data, err := io.ReadAll(rc)
+	data, err := io.ReadAll(io.LimitReader(rc, wantLen+1))
 	_ = rc.Close()
 	if err != nil {
 		return nil, err
+	}
+	if int64(len(data)) != wantLen {
+		return nil, fmt.Errorf("object size %d != expected %d for digest %s", len(data), wantLen, want)
 	}
 	if got := chunk.Sum(data); got != want {
 		return nil, fmt.Errorf("poison object for digest %s", want)
@@ -535,6 +635,7 @@ func GC(ctx context.Context, mid transport.Transport, jobID string, force bool) 
 		}
 	}
 	var man Manifest
+	var first error
 	if err := getJSON(ctx, mid, p.manifest(), &man); err == nil {
 		seen := map[chunk.Digest]struct{}{}
 		for _, f := range man.Files {
@@ -543,19 +644,25 @@ func GC(ctx context.Context, mid transport.Transport, jobID string, force bool) 
 					continue
 				}
 				seen[c.Digest] = struct{}{}
-				_ = mid.Remove(ctx, p.object(c.Digest))
+				if err := mid.Remove(ctx, p.object(c.Digest)); err != nil && !isAbsent(err) && first == nil {
+					first = fmt.Errorf("remove object %s: %w", c.Digest, err)
+				}
 			}
 		}
 	}
 	for _, rel := range []string{p.lease(), p.manifest(), p.notify(), p.ack()} {
-		_ = mid.Remove(ctx, rel)
+		if err := mid.Remove(ctx, rel); err != nil && !isAbsent(err) && first == nil {
+			first = fmt.Errorf("remove %s: %w", rel, err)
+		}
 	}
-	return nil
+	return first
 }
 
 func putBytes(ctx context.Context, t transport.Transport, rel string, data []byte) error {
-	if err := t.MkdirAll(ctx, path.Dir(rel)); err != nil {
-		return err
+	if dir := path.Dir(rel); dir != "" && dir != "." {
+		if err := t.MkdirAll(ctx, dir); err != nil {
+			return err
+		}
 	}
 	ws, err := t.BeginWrite(ctx, rel, int64(len(data)))
 	if err != nil {
@@ -573,11 +680,31 @@ func putBytes(ctx context.Context, t transport.Transport, rel string, data []byt
 	return nil
 }
 
+var errJSONTooLarge = errors.New("json payload exceeds size limit")
+
 func getJSON(ctx context.Context, t transport.Transport, rel string, v any) error {
+	return getJSONLimited(ctx, t, rel, v, maxJSONBytes)
+}
+
+func getJSONLimited(ctx context.Context, t transport.Transport, rel string, v any, maxBytes int64) error {
 	rc, err := t.OpenRead(ctx, rel)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = rc.Close() }()
-	return json.NewDecoder(rc).Decode(v)
+	return decodeJSONLimited(rc, v, maxBytes)
+}
+
+func decodeJSONLimited(r io.Reader, v any, maxBytes int64) error {
+	data, err := io.ReadAll(io.LimitReader(r, maxBytes+1))
+	if err != nil {
+		return err
+	}
+	if int64(len(data)) > maxBytes {
+		return errJSONTooLarge
+	}
+	if err := json.Unmarshal(data, v); err != nil {
+		return fmt.Errorf("json decode: %w", err)
+	}
+	return nil
 }

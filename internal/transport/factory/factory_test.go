@@ -2,6 +2,8 @@ package factory
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -19,6 +21,19 @@ func TestOpenFile(t *testing.T) {
 	if tr.Root() == "" {
 		t.Fatal("empty root")
 	}
+}
+
+func TestOpenFileDoesNotCreateRootUnlessRequested(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing")
+	ep := transport.Endpoint{Scheme: "file", Path: path, Raw: path}
+	if _, err := Open(context.Background(), ep, transport.OpenOptions{}); !os.IsNotExist(err) {
+		t.Fatalf("got %v, want not-exist", err)
+	}
+	tr, err := Open(context.Background(), ep, transport.OpenOptions{CreateRoot: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tr.Close() }()
 }
 
 func TestOpenS3MissingBucket(t *testing.T) {

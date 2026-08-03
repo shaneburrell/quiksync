@@ -116,6 +116,33 @@ func TestProgressTickerEmitsProgress(t *testing.T) {
 	}
 }
 
+func TestRunAndVerifyRejectInvalidEndpoints(t *testing.T) {
+	ctx := context.Background()
+	if _, err := engine.Run(ctx, engine.Config{Source: "://bad", Dest: t.TempDir(), Tune: baseTune()}); err == nil {
+		t.Fatal("expected invalid source endpoint")
+	}
+	if _, err := engine.Run(ctx, engine.Config{Source: t.TempDir(), Dest: "://bad", Tune: baseTune()}); err == nil {
+		t.Fatal("expected invalid destination endpoint")
+	}
+	if _, err := engine.Run(ctx, engine.Config{Source: filepath.Join(t.TempDir(), "missing"), Dest: t.TempDir(), Tune: baseTune()}); err == nil {
+		t.Fatal("expected missing source error")
+	}
+	if _, err := engine.Verify(ctx, "://bad", t.TempDir()); err == nil {
+		t.Fatal("expected invalid verify source")
+	}
+	if _, err := engine.Verify(ctx, t.TempDir(), "://bad"); err == nil {
+		t.Fatal("expected invalid verify destination")
+	}
+	if _, err := engine.Verify(ctx, t.TempDir(), filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Fatal("expected missing verify destination")
+	}
+	if _, err := engine.Run(ctx, engine.Config{
+		Source: t.TempDir(), Dest: t.TempDir(), LogFile: t.TempDir(), Tune: baseTune(),
+	}); err == nil {
+		t.Fatal("expected log file open error")
+	}
+}
+
 func bytesRepeat(b byte, n int) []byte {
 	out := make([]byte, n)
 	for i := range out {

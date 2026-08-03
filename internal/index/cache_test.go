@@ -43,3 +43,43 @@ func TestCacheRejectsTraversal(t *testing.T) {
 		t.Fatal("expected path rejection")
 	}
 }
+
+func TestCacheMissWhenStoredAvgZero(t *testing.T) {
+	c, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig := chunk.FileSignature{Size: 10, Digest: chunk.Digest{1}}
+	if err := c.Put("f.bin", 10, 1, 0, sig); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := c.Get("f.bin", 10, 1, 64*1024); ok {
+		t.Fatal("legacy AvgSize=0 must miss when caller avg is non-zero")
+	}
+	if _, ok := c.Get("f.bin", 10, 1, 0); !ok {
+		t.Fatal("AvgSize=0 caller should still hit legacy entry")
+	}
+}
+
+func TestCacheDelete(t *testing.T) {
+	c, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig := chunk.FileSignature{Size: 1, Digest: chunk.Digest{1}}
+	if err := c.Put("dir/f.bin", 1, 2, 64, sig); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Delete("dir/f.bin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := c.Get("dir/f.bin", 1, 2, 64); ok {
+		t.Fatal("deleted cache entry was returned")
+	}
+	if err := c.Delete("dir/f.bin"); err != nil {
+		t.Fatalf("deleting missing entry: %v", err)
+	}
+	if err := c.Delete("../escape"); err == nil {
+		t.Fatal("expected traversal rejection")
+	}
+}

@@ -19,7 +19,8 @@ type FileInfo struct {
 	IsSymlink bool
 }
 
-// Walk lists regular files under root, applying exclude globs.
+// Walk lists regular files, directories, and symlinks under root, applying
+// exclude globs. Other special files are intentionally omitted.
 func Walk(root string, exclude []string) ([]FileInfo, error) {
 	root = filepath.Clean(root)
 	var out []FileInfo
@@ -63,10 +64,7 @@ func Walk(root string, exclude []string) ([]FileInfo, error) {
 			IsDir:     d.IsDir(),
 			IsSymlink: info.Mode()&os.ModeSymlink != 0,
 		}
-		if d.IsDir() {
-			return nil
-		}
-		if !info.Mode().IsRegular() {
+		if !d.IsDir() && !fi.IsSymlink && !info.Mode().IsRegular() {
 			return nil
 		}
 		out = append(out, fi)

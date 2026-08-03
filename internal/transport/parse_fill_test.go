@@ -22,6 +22,18 @@ func TestParseEndpointMoreSchemes(t *testing.T) {
 	if err != nil || ep.Scheme != "ssh" || ep.Path != "." {
 		t.Fatalf("scp empty path: %+v %v", ep, err)
 	}
+	ep, err = ParseEndpoint("user@host:2222:/data")
+	if err != nil || ep.Host != "host" || ep.Port != "2222" || ep.Path != "/data" {
+		t.Fatalf("scp port: %+v %v", ep, err)
+	}
+	ep, err = ParseEndpoint("[2001:db8::1]:/data")
+	if err != nil || ep.Host != "2001:db8::1" || ep.Path != "/data" {
+		t.Fatalf("scp ipv6: %+v %v", ep, err)
+	}
+	ep, err = ParseEndpoint("user@[2001:db8::1]:2222:/tmp")
+	if err != nil || ep.User != "user" || ep.Host != "2001:db8::1" || ep.Port != "2222" || ep.Path != "/tmp" {
+		t.Fatalf("scp ipv6 port: %+v %v", ep, err)
+	}
 	if _, err := ParseEndpoint("ftp://x"); err == nil {
 		t.Fatal("unsupported scheme")
 	}

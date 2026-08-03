@@ -1,6 +1,7 @@
 package ssh
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -39,6 +40,10 @@ func sshInsecureHostKey() bool {
 }
 
 func dialNative(ep transport.Endpoint) (*cryptossh.Client, *cryptossh.Session, error) {
+	return dialNativeContext(context.Background(), ep)
+}
+
+func dialNativeContext(ctx context.Context, ep transport.Endpoint) (*cryptossh.Client, *cryptossh.Session, error) {
 	user := ep.User
 	if user == "" {
 		user = os.Getenv("USER")
@@ -66,16 +71,41 @@ func dialNative(ep transport.Endpoint) (*cryptossh.Client, *cryptossh.Session, e
 		HostKeyCallback: hostKeyCB,
 		Timeout:         30 * time.Second,
 	}
-	client, err := cryptossh.Dial("tcp", addr, cfg)
-	if err != nil {
-		return nil, nil, fmt.Errorf("ssh dial %s: %w", addr, err)
+	type result struct {
+		client  *cryptossh.Client
+		session *cryptossh.Session
+		err     error
 	}
-	session, err := client.NewSession()
-	if err != nil {
-		_ = client.Close()
-		return nil, nil, fmt.Errorf("ssh session: %w", err)
+	resultCh := make(chan result, 1)
+	go func() {
+		client, err := cryptossh.Dial("tcp", addr, cfg)
+		if err != nil {
+			resultCh <- result{err: fmt.Errorf("ssh dial %s: %w", addr, err)}
+			return
+		}
+		session, err := client.NewSession()
+		if err != nil {
+			_ = client.Close()
+			resultCh <- result{err: fmt.Errorf("ssh session: %w", err)}
+			return
+		}
+		resultCh <- result{client: client, session: session}
+	}()
+	select {
+	case res := <-resultCh:
+		return res.client, res.session, res.err
+	case <-ctx.Done():
+		go func() {
+			res := <-resultCh
+			if res.session != nil {
+				_ = res.session.Close()
+			}
+			if res.client != nil {
+				_ = res.client.Close()
+			}
+		}()
+		return nil, nil, ctx.Err()
 	}
-	return client, session, nil
 }
 
 func nativeAuthMethods() ([]cryptossh.AuthMethod, error) {

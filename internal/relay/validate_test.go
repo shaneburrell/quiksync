@@ -54,6 +54,11 @@ func TestRejectMalformedManifest(t *testing.T) {
 	if err := os.MkdirAll(prefix, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	lease := Lease{JobID: job, ExpiresAt: time.Now().UTC().Add(time.Hour)}
+	lb, _ := json.Marshal(lease)
+	if err := os.WriteFile(filepath.Join(prefix, "lease.json"), lb, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	man := Manifest{
 		SchemaVersion: schemaVersion,
 		JobID:         job,

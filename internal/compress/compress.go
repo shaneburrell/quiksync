@@ -101,9 +101,12 @@ var zstdDecPool = sync.Pool{
 }
 
 // Decode decompresses data. Output is capped to uncompressedLen when > 0,
-// and never exceeds MaxUncompressedChunk.
+// and never exceeds MaxUncompressedChunk. CodecAuto is encode-only and rejected.
 func Decode(codec Codec, data []byte, uncompressedLen int) ([]byte, error) {
-	if codec == CodecNone || codec == CodecAuto {
+	if codec == CodecAuto {
+		return nil, fmt.Errorf("codec auto is encode-only")
+	}
+	if codec == CodecNone {
 		return data, nil
 	}
 	if uncompressedLen < 0 {

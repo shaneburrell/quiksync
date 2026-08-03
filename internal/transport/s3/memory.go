@@ -62,7 +62,11 @@ func (m *Memory) HeadObject(ctx context.Context, params *s3.HeadObjectInput, opt
 	}
 	sz := int64(len(o.body))
 	mt := o.modified
-	return &s3.HeadObjectOutput{ContentLength: &sz, LastModified: &mt, Metadata: o.meta}, nil
+	etag := fmt.Sprintf("\"%d-%x\"", sz, o.body)
+	if len(o.body) > 16 {
+		etag = fmt.Sprintf("\"%d-%x\"", sz, o.body[:16])
+	}
+	return &s3.HeadObjectOutput{ContentLength: &sz, LastModified: &mt, Metadata: o.meta, ETag: aws.String(etag)}, nil
 }
 
 func (m *Memory) GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error) {

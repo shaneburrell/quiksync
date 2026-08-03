@@ -43,6 +43,7 @@ type Reporter struct {
 	mirror   bool // also write action lines to stderr
 	progress bool // write progress lines to stderr
 	path     string
+	lastErr  error
 }
 
 // Options configures Open.
@@ -108,11 +109,17 @@ func (r *Reporter) Event(event string, fields ...Field) {
 	if r.f == nil {
 		return
 	}
-	_, _ = io.WriteString(r.f, line)
-	_ = r.f.Sync() // durable enough for tail -f / AI watchers
+	if _, err := io.WriteString(r.f, line); err != nil {
+		r.recordError(err)
+	} else if err := r.f.Sync(); err != nil { // durable enough for tail -f / AI watchers
+		r.recordError(err)
+	}
 	if r.latest != nil {
-		_, _ = io.WriteString(r.latest, line)
-		_ = r.latest.Sync()
+		if _, err := io.WriteString(r.latest, line); err != nil {
+			r.recordError(err)
+		} else if err := r.latest.Sync(); err != nil {
+			r.recordError(err)
+		}
 	}
 	if r.stderr != nil {
 		if event == "progress" {
@@ -133,6 +140,9 @@ func (r *Reporter) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var err error
+	if r.lastErr != nil {
+		err = r.lastErr
+	}
 	if r.latest != nil {
 		if e := r.latest.Close(); e != nil && err == nil {
 			err = e
@@ -146,6 +156,12 @@ func (r *Reporter) Close() error {
 		r.f = nil
 	}
 	return err
+}
+
+func (r *Reporter) recordError(err error) {
+	if r.lastErr == nil {
+		r.lastErr = err
+	}
 }
 
 func formatLine(ts time.Time, event string, fields ...Field) string {

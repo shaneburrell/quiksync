@@ -63,6 +63,20 @@ func TestOpenWritesLatestAndEvents(t *testing.T) {
 	}
 }
 
+func TestCloseReturnsEventWriteError(t *testing.T) {
+	r, err := Open(filepath.Join(t.TempDir(), "job.log"), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	r.Event("broken")
+	if err := r.Close(); err == nil {
+		t.Fatal("expected retained write error")
+	}
+}
+
 func TestDefaultLogPath(t *testing.T) {
 	got := DefaultLogPath("file", "/data/dst", "default", "/cfg")
 	if got != filepath.Join("/data/dst", ".quiksync", "logs", "default.log") {

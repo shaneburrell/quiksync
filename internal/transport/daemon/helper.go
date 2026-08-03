@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/shaneburrell/quiksync/internal/protocol"
@@ -172,6 +173,10 @@ func RunRemoteHelperOpts(ctx context.Context, r io.Reader, w io.Writer, opts Hel
 			buf := make([]byte, 64*1024)
 			readErr := error(nil)
 			for {
+				if err := ctx.Err(); err != nil {
+					readErr = err
+					break
+				}
 				n, err := rc.Read(buf)
 				if n > 0 {
 					if err := protocol.WriteMsg(w, protocol.MsgReadData, buf[:n]); err != nil {
@@ -206,8 +211,10 @@ func RunRemoteHelperOpts(ctx context.Context, r io.Reader, w io.Writer, opts Hel
 				continue
 			}
 			if session != nil {
-				_ = session.Abort()
-				session = nil
+				if err := writeErr(w, fmt.Errorf("write session already active")); err != nil {
+					return err
+				}
+				continue
 			}
 			session, err = lt.BeginWrite(ctx, req.Rel, req.Size)
 			if err != nil {
@@ -266,6 +273,12 @@ func RunRemoteHelperOpts(ctx context.Context, r io.Reader, w io.Writer, opts Hel
 				}
 				continue
 			}
+			if err := transport.ValidateWriteRange(req.NewOffset, req.Length, -1); err != nil {
+				if err := writeErr(w, err); err != nil {
+					return err
+				}
+				continue
+			}
 			if err := session.ReuseChunk(ctx, req.NewOffset, req.OldOffset, req.Digest, req.Length); err != nil {
 				_ = session.Abort()
 				session = nil
@@ -280,7 +293,18 @@ func RunRemoteHelperOpts(ctx context.Context, r io.Reader, w io.Writer, opts Hel
 		case protocol.MsgRelayNotify:
 			// Wakeup-only: wake local waiters; receivers still verify mid-store state.
 			var meta protocol.RelayNotifyMeta
-			_ = protocol.DecodeJSON(payload, &meta)
+			if err := protocol.DecodeJSON(payload, &meta); err != nil {
+				if err := writeErr(w, err); err != nil {
+					return err
+				}
+				continue
+			}
+			if strings.TrimSpace(meta.JobID) == "" {
+				if err := writeErr(w, fmt.Errorf("empty relay job id")); err != nil {
+					return err
+				}
+				continue
+			}
 			if err := validateRelayJobID(meta.JobID); err != nil {
 				if err := writeErr(w, err); err != nil {
 					return err
@@ -405,7 +429,7 @@ func RunRemoteHelperOpts(ctx context.Context, r io.Reader, w io.Writer, opts Hel
 				return err
 			}
 		case protocol.MsgTuneOffer, protocol.MsgTuneApply:
-			if err := protocol.WriteJSON(w, protocol.MsgOK, protocol.OK{OK: true}); err != nil {
+			if err := writeErr(w, fmt.Errorf("peer tuning is not supported")); err != nil {
 				return err
 			}
 		default:

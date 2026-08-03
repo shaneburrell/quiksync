@@ -13,7 +13,7 @@ func TestMapHelloCaps(t *testing.T) {
 		t.Fatalf("v1: %+v", v1)
 	}
 	v2 := mapHelloCaps(protocol.HelloOK{Version: "2", Caps: protocol.DefaultCaps()})
-	if !v2.SupportsReuseChunk || !v2.SupportsMultiplex {
+	if !v2.SupportsReuseChunk || v2.SupportsMultiplex {
 		t.Fatalf("v2: %+v", v2)
 	}
 }

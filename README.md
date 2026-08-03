@@ -100,6 +100,7 @@ Lines are UTC RFC3339 + logfmt (`event=file_ok path=… bytes=…`). stderr also
 ### Over SSH
 
 Remote host needs `quiksync` on `PATH`. QuikSync runs `quiksync remote-helper` over SSH stdio (rsync-style).
+`--auth-token` authenticates the QUIC daemon only; SSH uses its normal host and user authentication. Native SSH support is not available in Windows builds, which use the system `ssh` executable.
 
 ```bash
 quiksync copy ./src user@host:/data/dst
@@ -122,6 +123,10 @@ quiksync copy ./src quiksync://server.example:4242/ --auth-token "$QUIKSYNC_AUTH
 ```
 
 Remote destinations store resume journal/index under `$QUIKSYNC_CONFIG/jobs/<job-id>/` (default job id `default`; override with `--job-id`). `--exclude` patterns also protect matching destination paths from `--delete`.
+
+### Filesystem limitations
+
+Empty directories and symbolic links are preserved for local-to-local copies. Hard links are copied as independent files; link relationships are not preserved.
 
 ### S3-compatible object storage
 

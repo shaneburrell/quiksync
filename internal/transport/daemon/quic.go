@@ -62,17 +62,32 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 	}
 	defer func() { _ = ln.Close() }()
 
+	var wg sync.WaitGroup
 	for {
 		conn, err := ln.Accept(ctx)
 		if err != nil {
+			wg.Wait()
 			return err
 		}
-		go handleConn(ctx, conn, cfg)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			handleConn(ctx, conn, cfg)
+		}()
 	}
 }
 
 func handleConn(ctx context.Context, conn *quic.Conn, cfg ServeConfig) {
+	done := make(chan struct{})
+	defer close(done)
 	defer func() { _ = conn.CloseWithError(0, "bye") }()
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.CloseWithError(0, "server shutting down")
+		case <-done:
+		}
+	}()
 	sem := make(chan struct{}, maxConcurrentStreams)
 	var wg sync.WaitGroup
 	for {
@@ -170,6 +185,10 @@ func DialOpts(ctx context.Context, ep transport.Endpoint, opts DialOptions) (*Cl
 	c.caps = mapHelloCaps(ok)
 	// Client currently serializes all RPCs on one stream.
 	c.caps.SupportsMultiplex = false
+	c.root = ok.Root
+	if c.root == "" {
+		c.root = ep.Path
+	}
 	return c, nil
 }
 
@@ -192,19 +211,29 @@ type Client struct {
 	stream *quic.Stream
 	mu     sync.Mutex // serializes framed RPC on the shared stream
 	caps   transport.Caps
+	root   string
 }
 
 func (c *Client) Caps() transport.Caps { return c.caps }
 
 func (c *Client) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	_ = protocol.WriteMsg(c.stream, protocol.MsgBye, nil)
+	// Do not block forever if OpenRead/BeginWrite still holds mu. Close the
+	// underlying stream/conn first so in-flight sessions unblock, then try to
+	// send Bye when the lock is free.
+	if c.mu.TryLock() {
+		_ = protocol.WriteMsg(c.stream, protocol.MsgBye, nil)
+		c.mu.Unlock()
+	}
 	_ = c.stream.Close()
 	return c.conn.CloseWithError(0, "bye")
 }
 
-func (c *Client) Root() string { return c.ep.Path }
+func (c *Client) Root() string {
+	if c.root != "" {
+		return c.root
+	}
+	return c.ep.Path
+}
 
 func (c *Client) Walk(ctx context.Context, exclude []string) ([]transport.FileMeta, error) {
 	c.mu.Lock()
@@ -410,9 +439,10 @@ func (w *clientWrite) ReuseChunk(ctx context.Context, newOffset, oldOffset uint6
 
 // RelayNotify sends a wakeup-only mid-hop notify.
 func (c *Client) RelayNotify(ctx context.Context, meta protocol.RelayNotifyMeta) error {
-	c.mu.Lock()
+	if err := lockContext(ctx, &c.mu); err != nil {
+		return err
+	}
 	defer c.mu.Unlock()
-	_ = ctx
 	if err := protocol.WriteJSON(c.stream, protocol.MsgRelayNotify, meta); err != nil {
 		return err
 	}
@@ -421,9 +451,10 @@ func (c *Client) RelayNotify(ctx context.Context, meta protocol.RelayNotifyMeta)
 
 // RelayWait asks the peer to acknowledge a wait.
 func (c *Client) RelayWait(ctx context.Context, meta protocol.RelayNotifyMeta) (protocol.RelayNotifyMeta, error) {
-	c.mu.Lock()
+	if err := lockContext(ctx, &c.mu); err != nil {
+		return protocol.RelayNotifyMeta{}, err
+	}
 	defer c.mu.Unlock()
-	_ = ctx
 	if err := protocol.WriteJSON(c.stream, protocol.MsgRelayWait, meta); err != nil {
 		return protocol.RelayNotifyMeta{}, err
 	}
@@ -439,6 +470,21 @@ func (c *Client) RelayWait(ctx context.Context, meta protocol.RelayNotifyMeta) (
 		return protocol.RelayNotifyMeta{}, err
 	}
 	return out, nil
+}
+
+func lockContext(ctx context.Context, mu *sync.Mutex) error {
+	for !mu.TryLock() {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		mu.Unlock()
+		return err
+	}
+	return nil
 }
 
 func (w *clientWrite) Commit(ctx context.Context, expected chunk.Digest, mode os.FileMode, modTime time.Time) error {
@@ -490,8 +536,10 @@ func expectOK(r io.Reader) error {
 func remoteErr(typ protocol.MsgType, payload []byte) error {
 	if typ == protocol.MsgErr {
 		var em protocol.ErrMsg
-		_ = protocol.DecodeJSON(payload, &em)
-		return fmt.Errorf("%s", em.Error)
+		if err := protocol.DecodeJSON(payload, &em); err == nil && em.Error != "" {
+			return fmt.Errorf("%s", em.Error)
+		}
+		return fmt.Errorf("remote error (invalid or empty error response)")
 	}
 	return fmt.Errorf("unexpected message type %d", typ)
 }

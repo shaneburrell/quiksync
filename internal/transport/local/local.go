@@ -2,10 +2,13 @@ package local
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/shaneburrell/quiksync/internal/chunk"
@@ -19,14 +22,37 @@ type Transport struct {
 	nfs  bool
 }
 
+// renameFile is replaceable by tests to exercise the cross-device fallback.
+var renameFile = os.Rename
+
 func New(root string) (*Transport, error) {
+	return open(root, true)
+}
+
+// NewExisting opens an existing root without creating it.
+func NewExisting(root string) (*Transport, error) {
+	return open(root, false)
+}
+
+func open(root string, create bool) (*Transport, error) {
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(abs, 0o755); err != nil {
-		return nil, err
+	if create {
+		if err := os.MkdirAll(abs, 0o755); err != nil {
+			return nil, err
+		}
+	} else {
+		st, err := os.Stat(abs)
+		if err != nil {
+			return nil, err
+		}
+		if !st.IsDir() {
+			return nil, fmt.Errorf("local root is not a directory: %s", abs)
+		}
 	}
+	_ = gcStaging(filepath.Join(abs, ".quiksync.tmp"))
 	return &Transport{root: abs, nfs: isNFS(abs)}, nil
 }
 
@@ -72,7 +98,7 @@ func (t *Transport) Stat(ctx context.Context, rel string) (transport.FileMeta, e
 	if err != nil {
 		return transport.FileMeta{}, err
 	}
-	st, err := os.Stat(p)
+	st, err := os.Lstat(p)
 	if err != nil {
 		return transport.FileMeta{}, err
 	}
@@ -102,6 +128,57 @@ func (t *Transport) MkdirAll(ctx context.Context, rel string) error {
 		return err
 	}
 	return os.MkdirAll(p, 0o755)
+}
+
+func (t *Transport) Chmod(ctx context.Context, rel string, mode os.FileMode) error {
+	p, err := t.abs(rel)
+	if err != nil {
+		return err
+	}
+	return os.Chmod(p, mode&^os.ModeType)
+}
+
+func (t *Transport) ReadLink(ctx context.Context, rel string) (string, error) {
+	p, err := t.absNoFollow(rel)
+	if err != nil {
+		return "", err
+	}
+	return os.Readlink(p)
+}
+
+func (t *Transport) Symlink(ctx context.Context, target, rel string) error {
+	p, err := t.absNoFollow(rel)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(p); err == nil {
+		if err := os.RemoveAll(p); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return os.Symlink(target, p)
+}
+
+// absNoFollow confines every parent component but leaves the final path
+// unresolved so callers can inspect or replace a symlink itself.
+func (t *Transport) absNoFollow(rel string) (string, error) {
+	if _, err := transport.SafeJoinFile(t.root, rel); err != nil {
+		return "", err
+	}
+	parent := filepath.Dir(filepath.FromSlash(rel))
+	if parent == "." {
+		return filepath.Join(t.root, filepath.Base(filepath.FromSlash(rel))), nil
+	}
+	p, err := t.abs(filepath.ToSlash(parent))
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(p, filepath.Base(filepath.FromSlash(rel))), nil
 }
 
 func (t *Transport) GetSignature(ctx context.Context, rel string) (chunk.FileSignature, error) {
@@ -145,6 +222,7 @@ func (t *Transport) BeginWrite(ctx context.Context, rel string, size int64) (tra
 			return nil, err
 		}
 	}
+	_ = gcStaging(tmpDir)
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return nil, err
 	}
@@ -195,12 +273,36 @@ func ensureStagingDir(tmpDir string) error {
 	return nil
 }
 
+func gcStaging(tmpDir string) error {
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	cutoff := time.Now().Add(-24 * time.Hour)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "qs-") || !strings.HasSuffix(entry.Name(), ".partial") {
+			continue
+		}
+		info, err := entry.Info()
+		if err == nil && info.ModTime().Before(cutoff) {
+			_ = os.Remove(filepath.Join(tmpDir, entry.Name()))
+		}
+	}
+	return nil
+}
+
 func (w *writeSession) WriteChunk(ctx context.Context, offset uint64, codec compress.Codec, uncompressedLen int, data []byte) error {
 	if w.committed {
 		return fmt.Errorf("write after commit")
 	}
 	raw, err := compress.Decode(codec, data, uncompressedLen)
 	if err != nil {
+		return err
+	}
+	if err := transport.ValidateWriteRange(offset, len(raw), w.size); err != nil {
 		return err
 	}
 	if _, err := w.f.WriteAt(raw, int64(offset)); err != nil {
@@ -220,6 +322,9 @@ func (w *writeSession) ReuseChunk(ctx context.Context, newOffset, oldOffset uint
 		return err
 	}
 	if err := transport.ValidateReuseRange(oldOffset, length, w.oldSize); err != nil {
+		return err
+	}
+	if err := transport.ValidateWriteRange(newOffset, length, w.size); err != nil {
 		return err
 	}
 	buf := make([]byte, length)
@@ -276,7 +381,7 @@ func (w *writeSession) Commit(ctx context.Context, expected chunk.Digest, mode o
 		w.old = nil
 	}
 	if mode != 0 {
-		if err := os.Chmod(w.tempAbs, mode.Perm()); err != nil {
+		if err := os.Chmod(w.tempAbs, mode&^os.ModeType); err != nil {
 			return fmt.Errorf("chmod: %w", err)
 		}
 	}
@@ -285,13 +390,53 @@ func (w *writeSession) Commit(ctx context.Context, expected chunk.Digest, mode o
 			return fmt.Errorf("chtimes: %w", err)
 		}
 	}
-	if err := os.Rename(w.tempAbs, w.destAbs); err != nil {
-		return err
+	if err := renameFile(w.tempAbs, w.destAbs); err != nil {
+		if !errors.Is(err, syscall.EXDEV) {
+			return err
+		}
+		if err := copyAcrossDevices(w.tempAbs, w.destAbs, mode, modTime); err != nil {
+			return err
+		}
+		if err := os.Remove(w.tempAbs); err != nil {
+			return err
+		}
 	}
 	w.committed = true
 	if dir, err := os.Open(filepath.Dir(w.destAbs)); err == nil {
 		_ = dir.Sync()
 		_ = dir.Close()
+	}
+	return nil
+}
+
+func copyAcrossDevices(src, dst string, mode os.FileMode, modTime time.Time) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode&^os.ModeType)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		_ = out.Close()
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	if mode != 0 {
+		if err := os.Chmod(dst, mode&^os.ModeType); err != nil {
+			return err
+		}
+	}
+	if !modTime.IsZero() {
+		return os.Chtimes(dst, modTime, modTime)
 	}
 	return nil
 }

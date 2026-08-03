@@ -36,8 +36,7 @@ func TestDecodeEdges(t *testing.T) {
 	if _, err := Decode(CodecLZ4, enc, len(data)+5); err == nil {
 		t.Fatal("expected size mismatch")
 	}
-	got, err := Decode(CodecAuto, data, 0)
-	if err != nil || string(got) != string(data) {
-		t.Fatalf("auto decode: %q %v", got, err)
+	if _, err := Decode(CodecAuto, data, 0); err == nil {
+		t.Fatal("CodecAuto must be rejected on decode")
 	}
 }

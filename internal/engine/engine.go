@@ -2,10 +2,13 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -58,24 +61,26 @@ type Config struct {
 }
 
 type Stats struct {
-	FilesCopied  int64
-	FilesSkipped int64
-	FilesFailed  int64
-	FilesDeleted int64
-	BytesCopied  int64 // uncompressed verified payload
-	BytesPayload int64 // uncompressed bytes written for missing chunks
-	BytesWired   int64 // on-wire compressed bytes when known
-	ChunksReused int64
-	ChunksSent   int64
+	FilesCopied    int64
+	FilesWouldCopy int64
+	FilesSkipped   int64
+	FilesFailed    int64
+	FilesDeleted   int64
+	BytesCopied    int64 // uncompressed verified payload
+	BytesPayload   int64 // uncompressed bytes written for missing chunks
+	BytesWired     int64 // on-wire compressed bytes when known
+	ChunksReused   int64
+	ChunksSent     int64
 }
 
 type fileResult struct {
-	copied, skipped, failed    int64
-	bytes, wired, reused, sent int64
-	elapsed                    time.Duration
-	compressRatio              float64
-	attempts                   int
-	err                        error
+	copied, wouldCopy, skipped, failed int64
+	handled                            bool
+	bytes, wired, reused, sent         int64
+	elapsed                            time.Duration
+	compressRatio                      float64
+	attempts                           int
+	err                                error
 }
 
 func Run(ctx context.Context, cfg Config) (Stats, error) {
@@ -119,12 +124,16 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 	if cfg.ConfigDir != "" {
 		openOpts.StagingDir = filepath.Join(cfg.ConfigDir, "s3-staging")
 	}
-	src, err := factory.Open(ctx, srcEP, openOpts)
+	srcOpts := openOpts
+	srcOpts.CreateRoot = false
+	src, err := factory.Open(ctx, srcEP, srcOpts)
 	if err != nil {
 		return Stats{}, fmt.Errorf("source: %w", err)
 	}
 	defer func() { _ = src.Close() }()
-	dst, err := factory.Open(ctx, dstEP, openOpts)
+	dstOpts := openOpts
+	dstOpts.CreateRoot = true
+	dst, err := factory.Open(ctx, dstEP, dstOpts)
 	if err != nil {
 		return Stats{}, fmt.Errorf("dest: %w", err)
 	}
@@ -183,7 +192,7 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 
 	sample := make([]byte, 0, 64*1024)
 	for _, f := range srcFiles {
-		if f.Size == 0 {
+		if f.Size == 0 || f.Mode.IsDir() || f.Mode&os.ModeSymlink != 0 {
 			continue
 		}
 		rc, err := src.OpenRead(ctx, f.RelPath)
@@ -247,10 +256,18 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 			defer wg.Done()
 			for j := range jobs {
 				if err := ctx.Err(); err != nil {
-					return
+					atomic.AddInt64(&stats.FilesSkipped, 1)
+					if rep != nil {
+						rep.FileSkip(j.meta.RelPath)
+					}
+					if cfg.TestAfterFile != nil {
+						cfg.TestAfterFile(j.meta.RelPath, "skipped")
+					}
+					continue
 				}
 				res := transferOne(ctx, cfg, src, dst, j.meta, journ, idx, tuner, limiter)
 				atomic.AddInt64(&stats.FilesCopied, res.copied)
+				atomic.AddInt64(&stats.FilesWouldCopy, res.wouldCopy)
 				atomic.AddInt64(&stats.FilesSkipped, res.skipped)
 				atomic.AddInt64(&stats.FilesFailed, res.failed)
 				atomic.AddInt64(&stats.BytesCopied, res.bytes)
@@ -260,9 +277,9 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 				atomic.AddInt64(&stats.ChunksSent, res.sent)
 				if rep != nil {
 					switch {
-					case res.skipped > 0:
+					case res.skipped > 0 || res.wouldCopy > 0:
 						rep.FileSkip(j.meta.RelPath)
-					case res.copied > 0:
+					case res.copied > 0 || res.handled:
 						rep.FileOK(j.meta.RelPath, res.bytes, res.wired, res.reused, res.sent, res.elapsed)
 					default:
 						rep.FileFail(j.meta.RelPath, res.err, res.attempts)
@@ -272,9 +289,9 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 				}
 				if cfg.TestAfterFile != nil {
 					status := "failed"
-					if res.skipped > 0 {
+					if res.skipped > 0 || res.wouldCopy > 0 {
 						status = "skipped"
-					} else if res.copied > 0 {
+					} else if res.copied > 0 || res.handled {
 						status = "ok"
 					}
 					cfg.TestAfterFile(j.meta.RelPath, status)
@@ -288,9 +305,9 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 					BytesWired:    res.wired,
 					Elapsed:       res.elapsed,
 					ErrorRate:     float64(res.failed),
-					CPUPercent:    20,
+					CPUPercent:    0,
 					CompressRatio: ratio,
-					RTTMs:         10,
+					RTTMs:         0,
 				})
 			}
 		}()
@@ -381,7 +398,13 @@ func transferOne(
 		if status == "skipped" {
 			return fileResult{skipped: 1, elapsed: elapsed, attempts: attempts}
 		}
+		if status == "dry-run" {
+			return fileResult{wouldCopy: 1, bytes: n, wired: wired, reused: reused, sent: sent, elapsed: elapsed, attempts: attempts}
+		}
 		if status == "ok" {
+			if meta.Mode.IsDir() {
+				return fileResult{handled: true, elapsed: elapsed, attempts: attempts}
+			}
 			return fileResult{copied: 1, bytes: n, wired: wired, reused: reused, sent: sent, elapsed: elapsed, compressRatio: ratio, attempts: attempts}
 		}
 		if err != nil && isUnstable(err) {
@@ -418,8 +441,8 @@ func transferOne(
 type unstableError struct{ error }
 
 func isUnstable(err error) bool {
-	_, ok := err.(unstableError)
-	return ok
+	var u unstableError
+	return errors.As(err, &u)
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) error {
@@ -446,6 +469,42 @@ func tryTransfer(
 	start := time.Now()
 	defer func() { elapsed = time.Since(start) }()
 
+	if meta.Mode.IsDir() {
+		if cfg.DryRun {
+			return 0, 0, 0, 0, "dry-run", 0, 0, nil
+		}
+		if err := dst.MkdirAll(ctx, meta.RelPath); err != nil {
+			return 0, 0, 0, 0, "failed", 0, 0, err
+		}
+		if setter, ok := dst.(transport.ModeSetter); ok && meta.Mode != 0 {
+			if err := setter.Chmod(ctx, meta.RelPath, meta.Mode); err != nil {
+				return 0, 0, 0, 0, "failed", 0, 0, err
+			}
+		}
+		return 0, 0, 0, 0, "ok", 0, 0, nil
+	}
+	if meta.Mode&os.ModeSymlink != 0 {
+		if cfg.DryRun {
+			return 0, 0, 0, 0, "dry-run", 0, 0, nil
+		}
+		reader, ok := src.(transport.Linker)
+		if !ok {
+			return 0, 0, 0, 0, "failed", 0, 0, fmt.Errorf("symlink not supported by source transport")
+		}
+		writer, ok := dst.(transport.Linker)
+		if !ok {
+			return 0, 0, 0, 0, "failed", 0, 0, fmt.Errorf("symlink not supported by destination transport")
+		}
+		target, err := reader.ReadLink(ctx, meta.RelPath)
+		if err != nil {
+			return 0, 0, 0, 0, "failed", 0, 0, err
+		}
+		if err := writer.Symlink(ctx, target, meta.RelPath); err != nil {
+			return 0, 0, 0, 0, "failed", 0, 0, err
+		}
+		return 0, 0, 0, 0, "ok", 0, 0, nil
+	}
+
 	if cfg.StableWindow > 0 {
 		fi := fsmeta.FileInfo{ModTime: meta.ModTime, Size: meta.Size}
 		if !fsmeta.UnchangedFor(fi, cfg.StableWindow) {
@@ -469,7 +528,19 @@ func tryTransfer(
 					} else if match, herr := destDigestMatches(ctx, dst, meta.RelPath, e.SrcDigest); herr != nil {
 						return 0, 0, 0, 0, "failed", 0, 0, herr
 					} else if match {
-						return 0, 0, 0, 0, "skipped", 0, 0, nil
+						// Dest matches journal; also ensure source was not rewritten
+						// in-place with the same size/mtime.
+						srcMatch, serr := fileDigestMatches(ctx, src, meta.RelPath, e.SrcDigest)
+						if serr != nil {
+							return 0, 0, 0, 0, "failed", 0, 0, serr
+						}
+						if srcMatch {
+							return 0, 0, 0, 0, "skipped", 0, 0, nil
+						}
+						forceTransfer = true
+						if idx != nil {
+							_ = idx.Delete(meta.RelPath)
+						}
 					} else {
 						// Digest mismatch despite matching size/mtime — must re-copy.
 						forceTransfer = true
@@ -520,10 +591,20 @@ func tryTransfer(
 
 	var destSig chunk.FileSignature
 	// Never trust a stale index when journal already proved dest content is wrong.
+	// On cache hit, verify live dest content still matches the cached digest before
+	// using chunk maps for skip/reuse (size/mtime alone is insufficient).
 	if idx != nil && !cfg.Checksum && !forceTransfer {
 		if dm, err := dst.Stat(ctx, meta.RelPath); err == nil {
 			if cached, ok := idx.Get(meta.RelPath, dm.Size, dm.ModTime.UnixNano(), cdcAvg); ok {
-				destSig = cached
+				match, herr := fileDigestMatches(ctx, dst, meta.RelPath, cached.Digest.String())
+				if herr != nil {
+					return 0, 0, 0, 0, "failed", 0, 0, herr
+				}
+				if match {
+					destSig = cached
+				} else if derr := idx.Delete(meta.RelPath); derr != nil && cfg.Verbose {
+					fmt.Fprintf(os.Stderr, "warn index delete %s: %v\n", meta.RelPath, derr)
+				}
 			}
 		}
 	}
@@ -558,14 +639,16 @@ func tryTransfer(
 		if payload == 0 && sig.Digest != destSig.Digest {
 			payload = sig.Size
 		}
-		return payload, 0, int64(len(plan.Reuse)), int64(len(plan.Missing)), "ok", 0, 0, nil
+		return payload, 0, int64(len(plan.Reuse)), int64(len(plan.Missing)), "dry-run", 0, 0, nil
 	}
 
 	if journ != nil {
-		_ = journ.Put(journal.Entry{
+		if err := journ.Put(journal.Entry{
 			JobID: cfg.JobID, RelPath: meta.RelPath, Status: journal.StatusInProgress,
 			SrcDigest: sig.Digest.String(), SrcSize: gen.Size, SrcModNano: gen.ModNano,
-		})
+		}); err != nil {
+			return 0, 0, 0, 0, "failed", 0, 0, fmt.Errorf("journal put: %w", err)
+		}
 	}
 
 	ws, err := dst.BeginWrite(ctx, meta.RelPath, sig.Size)
@@ -599,11 +682,11 @@ func tryTransfer(
 		}
 		_, isMissing := missingSet[c.Digest]
 		if isMissing || fullWire {
-			if err := limiter.Wait(ctx, len(data)); err != nil {
-				return err
-			}
 			codec, enc, err := compress.Encode(codecPref, data)
 			if err != nil {
+				return err
+			}
+			if err := limiter.Wait(ctx, len(enc)); err != nil {
 				return err
 			}
 			if err := ws.WriteChunk(ctx, c.Offset, codec, len(data), enc); err != nil {
@@ -616,6 +699,9 @@ func tryTransfer(
 		}
 		re := reuseByNew[c.Offset]
 		if canReuse {
+			if err := limiter.Wait(ctx, re.Length); err != nil {
+				return err
+			}
 			return ws.ReuseChunk(ctx, re.NewOffset, re.OldOffset, re.Digest, re.Length)
 		}
 		// Legacy full-wire path when dest cannot reuse.
@@ -675,8 +761,8 @@ func tryTransfer(
 			JobID: cfg.JobID, RelPath: meta.RelPath, Status: journal.StatusComplete,
 			SrcDigest: sig.Digest.String(), SrcSize: gen.Size, SrcModNano: gen.ModNano,
 			ChunksDone: len(sig.Chunks),
-		}); err != nil && cfg.Verbose {
-			fmt.Fprintf(os.Stderr, "warn journal put %s: %v\n", meta.RelPath, err)
+		}); err != nil {
+			return 0, 0, 0, 0, "failed", 0, 0, fmt.Errorf("journal put: %w", err)
 		}
 	}
 	compRatio := 1.0
@@ -715,8 +801,35 @@ func deleteExtras(ctx context.Context, srcFiles []transport.FileMeta, dst transp
 		if fsmeta.MatchExclude(f.RelPath, exclude) {
 			continue
 		}
+		if f.Mode.IsDir() {
+			continue
+		}
 		if err := dst.Remove(ctx, f.RelPath); err != nil {
+			return n, fmt.Errorf("deleted %d then: %w", n, err)
+		}
+		if rep != nil {
+			rep.Delete(f.RelPath)
+		}
+		n++
+	}
+	// Remove source-absent directories after files. Walk order is pre-order, so
+	// reverse depth order to ensure only empty children are removed first.
+	sort.Slice(dstFiles, func(i, j int) bool {
+		return len(strings.Split(dstFiles[i].RelPath, "/")) > len(strings.Split(dstFiles[j].RelPath, "/"))
+	})
+	for _, f := range dstFiles {
+		if !f.Mode.IsDir() {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
 			return n, err
+		}
+		if _, ok := keep[f.RelPath]; ok || fsmeta.MatchExclude(f.RelPath, exclude) {
+			continue
+		}
+		if err := dst.Remove(ctx, f.RelPath); err != nil {
+			// It may still contain excluded or concurrently-created content.
+			continue
 		}
 		if rep != nil {
 			rep.Delete(f.RelPath)
@@ -727,7 +840,11 @@ func deleteExtras(ctx context.Context, srcFiles []transport.FileMeta, dst transp
 }
 
 func destDigestMatches(ctx context.Context, dst transport.Transport, rel, want string) (bool, error) {
-	rc, err := dst.OpenRead(ctx, rel)
+	return fileDigestMatches(ctx, dst, rel, want)
+}
+
+func fileDigestMatches(ctx context.Context, t transport.Transport, rel, want string) (bool, error) {
+	rc, err := t.OpenRead(ctx, rel)
 	if err != nil {
 		return false, err
 	}
@@ -769,12 +886,16 @@ func VerifyFiltered(ctx context.Context, source, dest string, opts transport.Ope
 	if err != nil {
 		return nil, err
 	}
-	src, err := factory.Open(ctx, srcEP, opts)
+	srcOpts := opts
+	srcOpts.CreateRoot = false
+	src, err := factory.Open(ctx, srcEP, srcOpts)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = src.Close() }()
-	dst, err := factory.Open(ctx, dstEP, opts)
+	dstOpts := opts
+	dstOpts.CreateRoot = false
+	dst, err := factory.Open(ctx, dstEP, dstOpts)
 	if err != nil {
 		return nil, err
 	}
@@ -786,6 +907,9 @@ func VerifyFiltered(ctx context.Context, source, dest string, opts transport.Ope
 	}
 	var mismatches []string
 	for _, f := range files {
+		if f.Mode.IsDir() {
+			continue
+		}
 		sr, err := src.OpenRead(ctx, f.RelPath)
 		if err != nil {
 			mismatches = append(mismatches, f.RelPath+": source open: "+err.Error())

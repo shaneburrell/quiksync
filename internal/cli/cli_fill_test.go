@@ -27,6 +27,17 @@ func TestCLIInvalidViaAndJobID(t *testing.T) {
 	}
 }
 
+func TestCLIRejectsUnsafeTransferJobIDAndNegativeBandwidth(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	mustWrite(t, filepath.Join(src, "a.txt"), "a")
+	if err := cli.ExecuteArgs([]string{"copy", src, dst, "--no-log", "--job-id", "../escape"}); err == nil {
+		t.Fatal("expected unsafe transfer job id to fail")
+	}
+	if err := cli.ExecuteArgs([]string{"copy", src, dst, "--no-log", "--bwlimit", "-1"}); err == nil {
+		t.Fatal("expected negative bandwidth limit to fail")
+	}
+}
+
 func TestCLIRelayGCForce(t *testing.T) {
 	src, mid, dst := t.TempDir(), t.TempDir(), t.TempDir()
 	mustWrite(t, filepath.Join(src, "g.txt"), "gc-force")

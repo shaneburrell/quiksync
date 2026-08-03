@@ -52,13 +52,13 @@ func TestHelperPeerStatsTuneUnknown(t *testing.T) {
 	if err := protocol.WriteJSON(w, protocol.MsgTuneOffer, map[string]any{}); err != nil {
 		t.Fatal(err)
 	}
-	if typ, _, err := protocol.ReadMsg(r); err != nil || typ != protocol.MsgOK {
+	if typ, _, err := protocol.ReadMsg(r); err != nil || typ != protocol.MsgErr {
 		t.Fatalf("tune offer: typ=%v err=%v", typ, err)
 	}
 	if err := protocol.WriteJSON(w, protocol.MsgTuneApply, map[string]any{}); err != nil {
 		t.Fatal(err)
 	}
-	if typ, _, err := protocol.ReadMsg(r); err != nil || typ != protocol.MsgOK {
+	if typ, _, err := protocol.ReadMsg(r); err != nil || typ != protocol.MsgErr {
 		t.Fatalf("tune apply: typ=%v err=%v", typ, err)
 	}
 	if err := protocol.WriteMsg(w, 0xFE, []byte("x")); err != nil {
@@ -156,7 +156,7 @@ func TestHelperBadJSONAndFailures(t *testing.T) {
 		t.Fatalf("abort: typ=%v err=%v", typ, err)
 	}
 
-	// Replace in-flight session
+	// A second begin must not silently abort the in-flight session.
 	if err := protocol.WriteJSON(w, protocol.MsgBeginWrite, protocol.BeginWriteReq{Rel: "a.txt", Size: 1}); err != nil {
 		t.Fatal(err)
 	}
@@ -164,8 +164,8 @@ func TestHelperBadJSONAndFailures(t *testing.T) {
 	if err := protocol.WriteJSON(w, protocol.MsgBeginWrite, protocol.BeginWriteReq{Rel: "b.txt", Size: 1}); err != nil {
 		t.Fatal(err)
 	}
-	if typ, _, err := protocol.ReadMsg(r); err != nil || typ != protocol.MsgOK {
-		t.Fatalf("replace begin: typ=%v err=%v", typ, err)
+	if typ, _, err := protocol.ReadMsg(r); err != nil || typ != protocol.MsgErr {
+		t.Fatalf("busy begin: typ=%v err=%v", typ, err)
 	}
 	_ = protocol.WriteMsg(w, protocol.MsgAbort, nil)
 	_, _, _ = protocol.ReadMsg(r)

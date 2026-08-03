@@ -180,6 +180,9 @@ func readFill(r io.Reader, buf []byte) (int, error) {
 		if err != nil {
 			return n, err
 		}
+		if nn == 0 {
+			return n, fmt.Errorf("read: no progress")
+		}
 	}
 	return n, nil
 }

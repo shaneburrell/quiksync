@@ -24,7 +24,11 @@ func newCopyCmd() *cobra.Command {
 			if cfg.LogFile != "" {
 				fmt.Fprintf(os.Stderr, "logging to %s\n", cfg.LogFile)
 			}
-			stats, err := engine.Run(context.Background(), cfg)
+			ctx := cmd.Context()
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			stats, err := engine.Run(ctx, cfg)
 			if err != nil {
 				return err
 			}
@@ -54,7 +58,11 @@ func newSyncCmd() *cobra.Command {
 			if cfg.LogFile != "" {
 				fmt.Fprintf(os.Stderr, "logging to %s\n", cfg.LogFile)
 			}
-			stats, err := engine.Run(context.Background(), cfg)
+			ctx := cmd.Context()
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			stats, err := engine.Run(ctx, cfg)
 			if err != nil {
 				return err
 			}
@@ -89,7 +97,11 @@ func newVerifyCmd() *cobra.Command {
 				S3Endpoint: s3Endpoint,
 				S3Region:   s3Region,
 			}
-			mismatches, err := engine.VerifyFiltered(context.Background(), args[0], args[1], opts, exclude)
+			ctx := cmd.Context()
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			mismatches, err := engine.VerifyFiltered(ctx, args[0], args[1], opts, exclude)
 			if err != nil {
 				return err
 			}

@@ -2,7 +2,10 @@ package relay
 
 import (
 	"context"
+	"errors"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -81,6 +84,34 @@ func TestWaitForJobSignalFailureKeepsPolling(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected timeout")
 	}
+}
+
+func TestSendReturnsNotifyFailure(t *testing.T) {
+	srcRoot, midRoot := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcRoot, "a.txt"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	src, err := local.NewExisting(srcRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mid, err := local.New(midRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = Send(context.Background(), src, mid, SendOptions{JobID: "notify-fail", Signal: notifyFailSignal{}})
+	if !errors.Is(err, errNotify) {
+		t.Fatalf("got %v, want notify failure", err)
+	}
+}
+
+var errNotify = errors.New("notify failed")
+
+type notifyFailSignal struct{}
+
+func (notifyFailSignal) Notify(context.Context, string, NotifyMeta) error { return errNotify }
+func (notifyFailSignal) Wait(context.Context, string) (NotifyMeta, error) {
+	return NotifyMeta{}, nil
 }
 
 type failingSignal struct{}

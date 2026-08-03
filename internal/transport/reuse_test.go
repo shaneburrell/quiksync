@@ -32,3 +32,18 @@ func TestValidateReuseRange(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestValidateWriteRange(t *testing.T) {
+	if err := ValidateWriteRange(0, 64, 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateWriteRange(90, 20, 100); err == nil || !strings.Contains(err.Error(), "out of bounds") {
+		t.Fatalf("oob: %v", err)
+	}
+	if err := ValidateWriteRange(0, -1, 100); err == nil {
+		t.Fatal("negative length")
+	}
+	if err := ValidateWriteRange(0, 64, -1); err != nil {
+		t.Fatal(err)
+	}
+}

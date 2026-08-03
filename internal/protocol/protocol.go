@@ -59,7 +59,12 @@ type Header struct {
 	Len  uint32
 }
 
+const maxMessageBytes = 64 << 20
+
 func WriteMsg(w io.Writer, typ MsgType, payload []byte) error {
+	if len(payload) > maxMessageBytes {
+		return fmt.Errorf("message too large: %d", len(payload))
+	}
 	var hdr [5]byte
 	hdr[0] = byte(typ)
 	binary.BigEndian.PutUint32(hdr[1:], uint32(len(payload)))
@@ -80,7 +85,7 @@ func ReadMsg(r io.Reader) (MsgType, []byte, error) {
 	}
 	typ := MsgType(hdr[0])
 	n := binary.BigEndian.Uint32(hdr[1:])
-	if n > 64<<20 {
+	if n > maxMessageBytes {
 		return 0, nil, fmt.Errorf("message too large: %d", n)
 	}
 	buf := make([]byte, n)
@@ -214,8 +219,9 @@ type RelayNotifyMeta struct {
 // DefaultCaps are advertised by local-backed remote helpers.
 func DefaultCaps() Caps {
 	return Caps{
-		SupportsDelta:      true,
-		SupportsMultiplex:  true,
+		SupportsDelta: true,
+		// Remote helpers process one framed RPC stream at a time.
+		SupportsMultiplex:  false,
 		SupportsResume:     true,
 		SupportsReuseChunk: true,
 	}

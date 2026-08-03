@@ -68,7 +68,9 @@ func (c *Cache) Get(rel string, size int64, modNano int64, avgSize uint32) (chun
 	if cs.Size != size || cs.ModNano != modNano {
 		return chunk.FileSignature{}, false
 	}
-	if avgSize != 0 && cs.AvgSize != 0 && cs.AvgSize != avgSize {
+	// Legacy entries with AvgSize==0 cannot be trusted when the caller has a
+	// non-zero CDC average — chunk boundaries may not match.
+	if avgSize != 0 && cs.AvgSize != avgSize {
 		return chunk.FileSignature{}, false
 	}
 	sig := chunk.FileSignature{Size: cs.Size, Digest: cs.Digest}

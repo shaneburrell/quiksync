@@ -49,6 +49,19 @@ type Transport interface {
 	GetSignature(ctx context.Context, rel string) (chunk.FileSignature, error)
 }
 
+// Linker is implemented by transports that can preserve symbolic links.
+// It is optional so existing remote transports can explicitly remain
+// unsupported without expanding the base Transport contract.
+type Linker interface {
+	ReadLink(ctx context.Context, rel string) (string, error)
+	Symlink(ctx context.Context, target, rel string) error
+}
+
+// ModeSetter is implemented by transports that can apply directory modes.
+type ModeSetter interface {
+	Chmod(ctx context.Context, rel string, mode os.FileMode) error
+}
+
 // Endpoint parses a URI-like source/dest into scheme + path (+ remote).
 type Endpoint struct {
 	Scheme string // file, ssh, quiksync, s3, nfs
@@ -63,6 +76,9 @@ type Endpoint struct {
 type OpenOptions struct {
 	Insecure  bool   // skip QUIC TOFU pin verification (labs only)
 	AuthToken string // QUIC daemon shared secret
+	// CreateRoot permits creating a local file:// root. Set this only for
+	// destinations; sources must already exist.
+	CreateRoot bool
 	// S3
 	S3Endpoint string
 	S3Region   string

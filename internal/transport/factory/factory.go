@@ -16,7 +16,10 @@ import (
 func Open(ctx context.Context, ep transport.Endpoint, opts transport.OpenOptions) (transport.Transport, error) {
 	switch ep.Scheme {
 	case "file":
-		return local.New(ep.Path)
+		if opts.CreateRoot {
+			return local.New(ep.Path)
+		}
+		return local.NewExisting(ep.Path)
 	case "ssh":
 		return sshxfer.New(ctx, ep)
 	case "quiksync":

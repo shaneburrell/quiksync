@@ -30,6 +30,7 @@ type Transport struct {
 	stdout  io.Reader
 	mu      sync.Mutex
 	caps    transport.Caps
+	root    string
 }
 
 func New(ctx context.Context, ep transport.Endpoint) (*Transport, error) {
@@ -74,12 +75,15 @@ func New(ctx context.Context, ep transport.Endpoint) (*Transport, error) {
 	t.caps = mapCaps(ok)
 	// SSH is single-stream regardless of remote advertisement.
 	t.caps.SupportsMultiplex = false
+	t.root = ok.Root
+	if t.root == "" {
+		t.root = ep.Path
+	}
 	return t, nil
 }
 
 func newNative(ctx context.Context, ep transport.Endpoint) (*Transport, error) {
-	_ = ctx
-	client, session, err := dialNative(ep)
+	client, session, err := dialNativeContext(ctx, ep)
 	if err != nil {
 		return nil, err
 	}
@@ -170,9 +174,11 @@ func mapCaps(ok protocol.HelloOK) transport.Caps {
 func (t *Transport) Caps() transport.Caps { return t.caps }
 
 func (t *Transport) Close() error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	_ = protocol.WriteMsg(t.stdin, protocol.MsgBye, nil)
+	// Avoid deadlock when a reader/write session still holds mu.
+	got := t.mu.TryLock()
+	if got {
+		_ = protocol.WriteMsg(t.stdin, protocol.MsgBye, nil)
+	}
 	_ = t.stdin.Close()
 	if c, ok := t.stdout.(io.Closer); ok {
 		_ = c.Close()
@@ -190,10 +196,18 @@ func (t *Transport) Close() error {
 		err = t.cmd.Wait()
 		t.cmd = nil
 	}
+	if got {
+		t.mu.Unlock()
+	}
 	return err
 }
 
-func (t *Transport) Root() string { return t.ep.Path }
+func (t *Transport) Root() string {
+	if t.root != "" {
+		return t.root
+	}
+	return t.ep.Path
+}
 
 func (t *Transport) Walk(ctx context.Context, exclude []string) ([]transport.FileMeta, error) {
 	t.mu.Lock()
@@ -405,9 +419,10 @@ func (w *writeSession) ReuseChunk(ctx context.Context, newOffset, oldOffset uint
 
 // RelayNotify sends a wakeup-only mid-hop notify (control plane).
 func (t *Transport) RelayNotify(ctx context.Context, meta protocol.RelayNotifyMeta) error {
-	t.mu.Lock()
+	if err := lockContext(ctx, &t.mu); err != nil {
+		return err
+	}
 	defer t.mu.Unlock()
-	_ = ctx
 	if err := protocol.WriteJSON(t.stdin, protocol.MsgRelayNotify, meta); err != nil {
 		return err
 	}
@@ -416,9 +431,10 @@ func (t *Transport) RelayNotify(ctx context.Context, meta protocol.RelayNotifyMe
 
 // RelayWait asks the peer to acknowledge a wait (paired with store poll).
 func (t *Transport) RelayWait(ctx context.Context, meta protocol.RelayNotifyMeta) (protocol.RelayNotifyMeta, error) {
-	t.mu.Lock()
+	if err := lockContext(ctx, &t.mu); err != nil {
+		return protocol.RelayNotifyMeta{}, err
+	}
 	defer t.mu.Unlock()
-	_ = ctx
 	if err := protocol.WriteJSON(t.stdin, protocol.MsgRelayWait, meta); err != nil {
 		return protocol.RelayNotifyMeta{}, err
 	}
@@ -434,6 +450,21 @@ func (t *Transport) RelayWait(ctx context.Context, meta protocol.RelayNotifyMeta
 		return protocol.RelayNotifyMeta{}, err
 	}
 	return out, nil
+}
+
+func lockContext(ctx context.Context, mu *sync.Mutex) error {
+	for !mu.TryLock() {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		mu.Unlock()
+		return err
+	}
+	return nil
 }
 
 func (w *writeSession) Commit(ctx context.Context, expected chunk.Digest, mode os.FileMode, modTime time.Time) error {
@@ -485,8 +516,10 @@ func expectOK(r io.Reader) error {
 func remoteErr(typ protocol.MsgType, payload []byte) error {
 	if typ == protocol.MsgErr {
 		var em protocol.ErrMsg
-		_ = protocol.DecodeJSON(payload, &em)
-		return fmt.Errorf("%s", em.Error)
+		if err := protocol.DecodeJSON(payload, &em); err == nil && em.Error != "" {
+			return fmt.Errorf("%s", em.Error)
+		}
+		return fmt.Errorf("remote error (invalid or empty error response)")
 	}
 	return fmt.Errorf("unexpected message type %d", typ)
 }

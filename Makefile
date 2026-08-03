@@ -2,7 +2,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo 0.1.
 BINARY  := quiksync
 LDFLAGS := -s -w -X github.com/shaneburrell/quiksync/internal/cli.version=$(VERSION)
 COVER_PKG := ./internal/...
-COVER_MIN ?= 70
+COVER_MIN ?= 80
 
 .PHONY: build build-all test test-race test-cover bench test-efficiency \
 	fmt lint vet tidy check cover release clean tools
@@ -27,7 +27,9 @@ test-race:
 
 test-cover cover:
 	mkdir -p testdata/artifacts
-	go test $(COVER_PKG) -coverprofile=testdata/artifacts/coverage.out -covermode=atomic
+	# Match CI: exclude experimental NFS (needs a live NFSv3 server) from the gate.
+	go test $$(go list $(COVER_PKG) | grep -vE '/transport/nfs$$') \
+		-coverprofile=testdata/artifacts/coverage.out -covermode=atomic
 	go tool cover -html=testdata/artifacts/coverage.out -o testdata/artifacts/coverage.html
 	@total=$$(go tool cover -func=testdata/artifacts/coverage.out | awk '/^total:/{print $$3}' | tr -d '%'); \
 	echo "total coverage: $${total}% (min $(COVER_MIN)%)"; \

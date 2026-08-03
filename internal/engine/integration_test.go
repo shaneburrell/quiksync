@@ -28,11 +28,92 @@ func TestDryRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats.FilesCopied != 1 {
-		t.Fatalf("copied=%d", stats.FilesCopied)
+	if stats.FilesCopied != 0 || stats.FilesWouldCopy != 1 {
+		t.Fatalf("copied=%d would_copy=%d", stats.FilesCopied, stats.FilesWouldCopy)
 	}
 	if _, err := os.Stat(filepath.Join(dst, "a.txt")); !os.IsNotExist(err) {
 		t.Fatal("dry-run must not create dest files")
+	}
+}
+
+func TestDryRunCountsDirectoriesAndLinks(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	if err := os.MkdirAll(filepath.Join(src, "empty"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("target", filepath.Join(src, "link")); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := engine.Run(context.Background(), engine.Config{
+		Source: src, Dest: dst, DryRun: true, Tune: baseTune(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.FilesCopied != 0 || stats.FilesWouldCopy != 2 {
+		t.Fatalf("copied=%d would_copy=%d", stats.FilesCopied, stats.FilesWouldCopy)
+	}
+	if _, err := os.Lstat(filepath.Join(dst, "link")); !os.IsNotExist(err) {
+		t.Fatalf("dry-run created link: %v", err)
+	}
+}
+
+func TestCanceledRunCountsSkippedFiles(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	writeFile(t, filepath.Join(src, "a.txt"), []byte("a"))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	stats, err := engine.Run(ctx, engine.Config{
+		Source: src, Dest: dst, Tune: baseTune(),
+	})
+	if err == nil {
+		t.Fatal("expected canceled run")
+	}
+	if stats.FilesSkipped != 1 || stats.FilesCopied != 0 {
+		t.Fatalf("stats=%+v", stats)
+	}
+}
+
+func TestSyncPreservesEmptyDirsAndDeletesExtraDirs(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	if err := os.MkdirAll(filepath.Join(src, "empty", "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dst, "extra", "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dst, "extra", "nested", "old.txt"), []byte("old"))
+
+	_, err := engine.Run(context.Background(), engine.Config{
+		Source: src, Dest: dst, SyncMode: true, Delete: true, Tune: baseTune(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st, err := os.Stat(filepath.Join(dst, "empty", "nested")); err != nil || !st.IsDir() {
+		t.Fatalf("empty directory missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "extra")); !os.IsNotExist(err) {
+		t.Fatalf("extra directory remains: %v", err)
+	}
+}
+
+func TestLocalCopyPreservesSymlink(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	writeFile(t, filepath.Join(src, "target.txt"), []byte("target"))
+	if err := os.Symlink("target.txt", filepath.Join(src, "link.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := engine.Run(context.Background(), engine.Config{
+		Source: src, Dest: dst, Tune: baseTune(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := os.Readlink(filepath.Join(dst, "link.txt"))
+	if err != nil || target != "target.txt" {
+		t.Fatalf("symlink target=%q err=%v", target, err)
 	}
 }
 

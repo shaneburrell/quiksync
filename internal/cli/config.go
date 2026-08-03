@@ -11,6 +11,7 @@ import (
 	"github.com/shaneburrell/quiksync/internal/autotune"
 	"github.com/shaneburrell/quiksync/internal/compress"
 	"github.com/shaneburrell/quiksync/internal/engine"
+	"github.com/shaneburrell/quiksync/internal/journal"
 	"github.com/shaneburrell/quiksync/internal/progress"
 	"github.com/shaneburrell/quiksync/internal/transport"
 )
@@ -62,7 +63,17 @@ func buildConfig(src, dest string, f TransferFlags, syncMode bool) (engine.Confi
 	if jobID == "" {
 		jobID = "default"
 	}
-	cfgDir, _ := quiksyncConfigDir()
+	jobID, err := journal.SanitizeJobID(jobID)
+	if err != nil {
+		return engine.Config{}, err
+	}
+	if f.BandwidthLimit < 0 {
+		return engine.Config{}, fmt.Errorf("--bwlimit must be non-negative")
+	}
+	cfgDir, err := quiksyncConfigDir()
+	if err != nil {
+		return engine.Config{}, fmt.Errorf("config directory: %w", err)
+	}
 	cfg := engine.Config{
 		Source:          src,
 		Dest:            dest,
@@ -114,7 +125,7 @@ func resolveLogPath(dest, jobID, override string) (string, error) {
 	}
 	cfgDir, err := quiksyncConfigDir()
 	if err != nil {
-		cfgDir = "."
+		return "", fmt.Errorf("config directory: %w", err)
 	}
 	root := ep.Path
 	if ep.Scheme == "file" {

@@ -37,9 +37,10 @@ type Entry struct {
 
 // Journal is an append-friendly JSONL store under dest/.quiksync/journal/.
 type Journal struct {
-	mu   sync.Mutex
-	path string
-	by   map[string]Entry
+	mu           sync.Mutex
+	path         string
+	by           map[string]Entry
+	CorruptLines int
 }
 
 // SanitizeJobID returns a filesystem-safe job id (no path separators / "..").
@@ -97,11 +98,18 @@ func (j *Journal) load() error {
 	for sc.Scan() {
 		var e Entry
 		if err := json.Unmarshal(sc.Bytes(), &e); err != nil {
+			j.CorruptLines++
 			continue
 		}
 		j.by[e.RelPath] = e
 	}
-	return sc.Err()
+	if err := sc.Err(); err != nil {
+		return err
+	}
+	if j.CorruptLines > 0 && len(j.by) == 0 {
+		return fmt.Errorf("journal corrupt")
+	}
+	return nil
 }
 
 func (j *Journal) Get(rel string) (Entry, bool) {
@@ -115,7 +123,6 @@ func (j *Journal) Put(e Entry) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	e.UpdatedAt = time.Now().UTC()
-	j.by[e.RelPath] = e
 	f, err := os.OpenFile(j.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		return err
@@ -129,7 +136,12 @@ func (j *Journal) Put(e Entry) error {
 		_ = f.Close()
 		return err
 	}
-	return f.Close()
+	if err := f.Close(); err != nil {
+		return err
+	}
+	// Update in-memory map only after durable append succeeds.
+	j.by[e.RelPath] = e
+	return nil
 }
 
 func (j *Journal) Completed(rel string) bool {
